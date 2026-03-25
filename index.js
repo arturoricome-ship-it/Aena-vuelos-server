@@ -12,7 +12,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// Mapeo de estados AENA
 const ESTADOS = {
   'SCH': { t: 'Programado',     c: 'e-scheduled' },
   'DEL': { t: 'Retrasado',      c: 'e-delayed' },
@@ -51,18 +50,15 @@ function limpiarCiudad(ciudad) {
     .replace('BRUSELAS', 'Bruselas')
     .replace('PARIS', 'París')
     .replace('LONDON', 'Londres')
-    .replace(/\s*\/.*$/, '')
-    .replace(/\s*-.*$/, '')
     .trim()
     .split(' ')
     .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
     .join(' ');
 }
 
-async function getVuelos(tipo) {
+async function fetchAena(tipo) {
   const flightType = tipo === 'salidas' ? 'D' : 'L';
   const url = `https://www.aena.es/sites/Satellite?pagename=AENA_ConsultarVuelos&airport=ALC&flightType=${flightType}&dosDias=si`;
-
   const response = await fetch(url, {
     headers: {
       'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
@@ -71,10 +67,12 @@ async function getVuelos(tipo) {
       'Referer': 'https://www.aena.es/es/infovuelos.html'
     }
   });
+  return await response.json();
+}
 
-  const data = await response.json();
+async function getVuelos(tipo) {
+  const data = await fetchAena(tipo);
 
-  // Filtrar solo Vueling (iataCompania = VY) y solo hoy
   const hoy = new Date();
   const hoyStr = String(hoy.getDate()).padStart(2,'0') + '/' +
     String(hoy.getMonth()+1).padStart(2,'0') + '/' +
@@ -92,10 +90,10 @@ async function getVuelos(tipo) {
         return {
           numero: 'VY' + v.numVuelo,
           origen: ciudad,
-          horaProg: horaProg,
+          horaProg,
           horaReal: horaEst !== horaProg ? horaEst : '',
           sala: v.salaPrimera || '',
-          cinta: v.cintaPrimera && v.cintaPrimera !== 'null' ? v.cintaPrimera : '',
+          cinta: (v.cintaPrimera && v.cintaPrimera !== 'null') ? v.cintaPrimera : '',
           estado: estado.t,
           estadoClass: estado.c
         };
@@ -103,9 +101,9 @@ async function getVuelos(tipo) {
         return {
           numero: 'VY' + v.numVuelo,
           destino: ciudad,
-          horaProg: horaProg,
+          horaProg,
           horaReal: horaEst !== horaProg ? horaEst : '',
-          puerta: v.puertaPrimera || '',
+          puerta: (v.puertaPrimera && v.puertaPrimera !== 'null') ? v.puertaPrimera : '',
           estado: estado.t,
           estadoClass: estado.c
         };
@@ -113,6 +111,18 @@ async function getVuelos(tipo) {
     })
     .sort((a, b) => a.horaProg.localeCompare(b.horaProg));
 }
+
+// DEBUG — ver todos los campos de un vuelo Vueling
+app.get('/debug', async (req, res) => {
+  try {
+    const tipo = req.query.tipo || 'salidas';
+    const data = await fetchAena(tipo);
+    const vy = data.find(v => v.iataCompania === 'VY') || data[0];
+    res.json({ ok: true, campos: Object.keys(vy), ejemplo: vy });
+  } catch(e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
 
 app.get('/vuelos', async (req, res) => {
   const tipo = req.query.tipo || 'llegadas';
