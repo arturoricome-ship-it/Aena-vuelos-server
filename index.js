@@ -59,15 +59,35 @@ function limpiarCiudad(ciudad) {
 async function fetchAena(tipo) {
   const flightType = tipo === 'salidas' ? 'D' : 'L';
   const url = `https://www.aena.es/sites/Satellite?pagename=AENA_ConsultarVuelos&airport=ALC&flightType=${flightType}&dosDias=si`;
+  
   const response = await fetch(url, {
+    method: 'GET',
     headers: {
-      'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
-      'Accept': 'application/json, text/plain, */*',
-      'Accept-Language': 'es-ES,es;q=0.9',
-      'Referer': 'https://www.aena.es/es/infovuelos.html'
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'application/json, text/javascript, */*; q=0.01',
+      'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Connection': 'keep-alive',
+      'Referer': 'https://www.aena.es/es/infovuelos.html',
+      'X-Requested-With': 'XMLHttpRequest',
+      'Sec-Fetch-Dest': 'empty',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Site': 'same-origin',
+      'Cache-Control': 'no-cache'
     }
   });
-  return await response.json();
+  
+  const text = await response.text();
+  
+  // Log para debug
+  console.log('Status:', response.status);
+  console.log('Respuesta:', text.substring(0, 200));
+  
+  if (!text.startsWith('[') && !text.startsWith('{')) {
+    throw new Error(`Respuesta no JSON (${response.status}): ${text.substring(0, 100)}`);
+  }
+  
+  return JSON.parse(text);
 }
 
 async function getVuelos(tipo) {
@@ -112,7 +132,6 @@ async function getVuelos(tipo) {
     .sort((a, b) => a.horaProg.localeCompare(b.horaProg));
 }
 
-// DEBUG — ver todos los campos de un vuelo Vueling
 app.get('/debug', async (req, res) => {
   try {
     const tipo = req.query.tipo || 'salidas';
