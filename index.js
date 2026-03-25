@@ -25,7 +25,10 @@ const ESTADOS = {
   'CAN': { t: 'Cancelado',      c: 'e-cancelled' },
   'IBK': { t: 'En vuelo',       c: 'e-active' },
   'CNX': { t: 'Cancelado',      c: 'e-cancelled' },
-  'DIV': { t: 'Desviado',       c: 'e-delayed' }
+  'DIV': { t: 'Desviado',       c: 'e-delayed' },
+  'FLY': { t: 'En vuelo',       c: 'e-active' },
+  'TKO': { t: 'En vuelo',       c: 'e-active' },
+  'OFB': { t: 'Fuera de puerta',c: 'e-active' }
 };
 
 async function getSession() {
