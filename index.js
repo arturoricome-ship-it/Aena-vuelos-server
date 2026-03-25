@@ -12,6 +12,53 @@ app.use((req, res, next) => {
   next();
 });
 
+// Mapeo de estados AENA
+const ESTADOS = {
+  'SCH': { t: 'Programado',     c: 'e-scheduled' },
+  'DEL': { t: 'Retrasado',      c: 'e-delayed' },
+  'BOR': { t: 'Embarcando',     c: 'e-boarding' },
+  'GCL': { t: 'Puerta cerrada', c: 'e-gate' },
+  'DEP': { t: 'En vuelo',       c: 'e-active' },
+  'AIR': { t: 'En vuelo',       c: 'e-active' },
+  'LND': { t: 'Aterrizado',     c: 'e-landed' },
+  'ARR': { t: 'Aterrizado',     c: 'e-landed' },
+  'CAN': { t: 'Cancelado',      c: 'e-cancelled' },
+  'IBK': { t: 'En vuelo',       c: 'e-active' },
+  'CNX': { t: 'Cancelado',      c: 'e-cancelled' },
+  'DIV': { t: 'Desviado',       c: 'e-delayed' }
+};
+
+function fmtHora(hora) {
+  if (!hora) return '--:--';
+  return hora.substring(0, 5);
+}
+
+function limpiarCiudad(ciudad) {
+  if (!ciudad) return '--';
+  return ciudad
+    .replace('BARCELONA-EL PRAT JOSEP TARRADELLAS', 'Barcelona')
+    .replace('ADOLFO SUAREZ MADRID-BARAJAS', 'Madrid')
+    .replace('ADOLFO SUÁREZ MADRID-BARAJAS', 'Madrid')
+    .replace('TENERIFE NORTE-C. LA LAGUNA', 'Tenerife Norte')
+    .replace('TENERIFE SUR-REINA SOFIA', 'Tenerife Sur')
+    .replace('GRAN CANARIA', 'Gran Canaria')
+    .replace('PARIS /ORLY', 'París Orly')
+    .replace('PARIS /CHARLES DE GAULLE', 'París CDG')
+    .replace('LONDON /GATWICK', 'Londres Gatwick')
+    .replace('LONDON /HEATHROW', 'Londres Heathrow')
+    .replace('LONDON /STANSTED', 'Londres Stansted')
+    .replace('AMSTERDAM /SCHIPHOL', 'Ámsterdam')
+    .replace('BRUSELAS', 'Bruselas')
+    .replace('PARIS', 'París')
+    .replace('LONDON', 'Londres')
+    .replace(/\s*\/.*$/, '')
+    .replace(/\s*-.*$/, '')
+    .trim()
+    .split(' ')
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(' ');
+}
+
 async function getVuelos(tipo) {
   const flightType = tipo === 'salidas' ? 'D' : 'L';
   const url = `https://www.aena.es/sites/Satellite?pagename=AENA_ConsultarVuelos&airport=ALC&flightType=${flightType}&dosDias=si`;
@@ -26,36 +73,46 @@ async function getVuelos(tipo) {
   });
 
   const data = await response.json();
-  return data;
-}
 
-function parsearVuelos(data, tipo) {
-  // Filtrar solo Vueling (VY / VLG) y solo hoy
+  // Filtrar solo Vueling (iataCompania = VY) y solo hoy
   const hoy = new Date();
-  const hoyStr = hoy.getFullYear() + '-' +
-    String(hoy.getMonth() + 1).padStart(2, '0') + '-' +
-    String(hoy.getDate()).padStart(2, '0');
+  const hoyStr = String(hoy.getDate()).padStart(2,'0') + '/' +
+    String(hoy.getMonth()+1).padStart(2,'0') + '/' +
+    hoy.getFullYear();
 
-  const vuelos = Array.isArray(data) ? data : (data.vuelos || data.flights || data.data || []);
+  return data
+    .filter(v => v.iataCompania === 'VY' && v.fecha === hoyStr)
+    .map(v => {
+      const estado = ESTADOS[v.estado] || { t: v.estado || 'Programado', c: 'e-scheduled' };
+      const horaProg = fmtHora(v.horaProgramada);
+      const horaEst = fmtHora(v.horaEstimada);
+      const ciudad = limpiarCiudad(v.ciudadIataOtro);
 
-  return vuelos.filter(v => {
-    const aerolinea = (v.aerolinea || v.airline || v.companyCode || JSON.stringify(v)).toUpperCase();
-    return aerolinea.includes('VY') || aerolinea.includes('VLG') || aerolinea.includes('VUELING');
-  }).filter(v => {
-    const fecha = v.fechaHoraSalida || v.fechaHoraLlegada || v.fecha || v.date || '';
-    return !fecha || fecha.includes(hoyStr) || fecha.includes(hoy.getDate());
-  });
+      if (tipo === 'llegadas') {
+        return {
+          numero: 'VY' + v.numVuelo,
+          origen: ciudad,
+          horaProg: horaProg,
+          horaReal: horaEst !== horaProg ? horaEst : '',
+          sala: v.salaPrimera || '',
+          cinta: v.cintaPrimera && v.cintaPrimera !== 'null' ? v.cintaPrimera : '',
+          estado: estado.t,
+          estadoClass: estado.c
+        };
+      } else {
+        return {
+          numero: 'VY' + v.numVuelo,
+          destino: ciudad,
+          horaProg: horaProg,
+          horaReal: horaEst !== horaProg ? horaEst : '',
+          puerta: v.puertaPrimera || '',
+          estado: estado.t,
+          estadoClass: estado.c
+        };
+      }
+    })
+    .sort((a, b) => a.horaProg.localeCompare(b.horaProg));
 }
-
-app.get('/debug', async (req, res) => {
-  try {
-    const tipo = req.query.tipo || 'llegadas';
-    const data = await getVuelos(tipo);
-    res.json({ ok: true, tipo, muestra: JSON.stringify(data).substring(0, 3000), total: Array.isArray(data) ? data.length : 'no-array' });
-  } catch(e) {
-    res.json({ ok: false, error: e.message });
-  }
-});
 
 app.get('/vuelos', async (req, res) => {
   const tipo = req.query.tipo || 'llegadas';
@@ -66,8 +123,7 @@ app.get('/vuelos', async (req, res) => {
   }
 
   try {
-    const data = await getVuelos(tipo);
-    const vuelos = parsearVuelos(data, tipo);
+    const vuelos = await getVuelos(tipo);
     cache[tipo] = vuelos;
     cache.ts = ahora;
     res.json({ ok: true, vuelos, cached: false, total: vuelos.length });
