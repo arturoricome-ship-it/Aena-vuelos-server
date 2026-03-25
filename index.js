@@ -1,5 +1,4 @@
 const express = require('express');
-const { chromium } = require('playwright');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -13,76 +12,68 @@ app.use((req, res, next) => {
   next();
 });
 
-async function getBrowser() {
-  return await chromium.launch({ 
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+async function getVuelos(tipo) {
+  const flightType = tipo === 'salidas' ? 'D' : 'L';
+  const url = `https://www.aena.es/sites/Satellite?pagename=AENA_ConsultarVuelos&airport=ALC&flightType=${flightType}&dosDias=si`;
+
+  const response = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+      'Accept': 'application/json, text/plain, */*',
+      'Accept-Language': 'es-ES,es;q=0.9',
+      'Referer': 'https://www.aena.es/es/infovuelos.html'
+    }
   });
+
+  const data = await response.json();
+  return data;
 }
 
-async function scrapAena(tipo) {
-  const browser = await getBrowser();
-  const capturedRequests = [];
-  const capturedResponses = [];
+function parsearVuelos(data, tipo) {
+  // Filtrar solo Vueling (VY / VLG) y solo hoy
+  const hoy = new Date();
+  const hoyStr = hoy.getFullYear() + '-' +
+    String(hoy.getMonth() + 1).padStart(2, '0') + '-' +
+    String(hoy.getDate()).padStart(2, '0');
 
-  try {
-    const page = await browser.newPage();
-    await page.setViewportSize({ width: 1280, height: 800 });
+  const vuelos = Array.isArray(data) ? data : (data.vuelos || data.flights || data.data || []);
 
-    // Capturar TODAS las peticiones de red
-    page.on('request', request => {
-      const url = request.url();
-      if (!url.includes('google') && !url.includes('dynatrace') && !url.includes('cookie') && !url.includes('.js') && !url.includes('.css') && !url.includes('.png') && !url.includes('.jpg') && !url.includes('.svg') && !url.includes('.woff')) {
-        capturedRequests.push({ url, method: request.method() });
-      }
-    });
-
-    page.on('response', async response => {
-      const url = response.url();
-      if (!url.includes('google') && !url.includes('dynatrace') && !url.includes('cookie') && !url.includes('.js') && !url.includes('.css') && !url.includes('.png') && !url.includes('.jpg') && !url.includes('.svg') && !url.includes('.woff')) {
-        try {
-          const ct = response.headers()['content-type'] || '';
-          if (ct.includes('json') || ct.includes('xml')) {
-            const text = await response.text().catch(() => '');
-            if (text.length > 50) {
-              capturedResponses.push({ url, status: response.status(), preview: text.substring(0, 500) });
-            }
-          }
-        } catch(e) {}
-      }
-    });
-
-    // Cargar la página con los parámetros
-    const atype = tipo === 'salidas' ? 'D' : 'A';
-    await page.goto(`https://www.aena.es/es/infovuelos.html?atype=${atype}&airportIata=ALC&airlineIata=VY`, { 
-      waitUntil: 'domcontentloaded', timeout: 30000 
-    });
-    
-    // Esperar bastante para que carguen los datos AJAX
-    await page.waitForTimeout(10000);
-
-    return { 
-      requests: capturedRequests.slice(0, 30),
-      responses: capturedResponses.slice(0, 10)
-    };
-
-  } finally {
-    await browser.close();
-  }
+  return vuelos.filter(v => {
+    const aerolinea = (v.aerolinea || v.airline || v.companyCode || JSON.stringify(v)).toUpperCase();
+    return aerolinea.includes('VY') || aerolinea.includes('VLG') || aerolinea.includes('VUELING');
+  }).filter(v => {
+    const fecha = v.fechaHoraSalida || v.fechaHoraLlegada || v.fecha || v.date || '';
+    return !fecha || fecha.includes(hoyStr) || fecha.includes(hoy.getDate());
+  });
 }
 
 app.get('/debug', async (req, res) => {
   try {
     const tipo = req.query.tipo || 'llegadas';
-    const data = await scrapAena(tipo);
-    res.json({ ok: true, data });
+    const data = await getVuelos(tipo);
+    res.json({ ok: true, tipo, muestra: JSON.stringify(data).substring(0, 3000), total: Array.isArray(data) ? data.length : 'no-array' });
   } catch(e) {
     res.json({ ok: false, error: e.message });
   }
 });
 
 app.get('/vuelos', async (req, res) => {
-  res.json({ ok: false, error: 'En desarrollo - usa /debug primero' });
+  const tipo = req.query.tipo || 'llegadas';
+  const ahora = Date.now();
+
+  if (cache[tipo] && (ahora - cache.ts) < CACHE_MS) {
+    return res.json({ ok: true, vuelos: cache[tipo], cached: true });
+  }
+
+  try {
+    const data = await getVuelos(tipo);
+    const vuelos = parsearVuelos(data, tipo);
+    cache[tipo] = vuelos;
+    cache.ts = ahora;
+    res.json({ ok: true, vuelos, cached: false, total: vuelos.length });
+  } catch(err) {
+    res.json({ ok: false, error: err.message });
+  }
 });
 
 app.get('/health', (req, res) => res.json({ ok: true }));
