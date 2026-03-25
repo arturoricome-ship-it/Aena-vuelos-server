@@ -28,56 +28,55 @@ const ESTADOS = {
   'DIV': { t: 'Desviado',       c: 'e-delayed' }
 };
 
-const HEADERS_BASE = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-  'Accept-Encoding': 'gzip, deflate, br',
-  'Connection': 'keep-alive'
-};
-
 async function getSession() {
-  // Paso 1: cargar la página principal para obtener cookies
-  const r1 = await fetch('https://www.aena.es/es/infovuelos.html', {
-    headers: { ...HEADERS_BASE, 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' }
+  const r = await fetch('https://www.aena.es/es/infovuelos.html', {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'es-ES,es;q=0.9'
+    }
   });
-  
-  const cookies = r1.headers.get('set-cookie') || '';
-  // Extraer solo los nombres=valores de las cookies
-  sessionCookie = cookies.split(',').map(c => c.split(';')[0].trim()).filter(Boolean).join('; ');
-  console.log('Cookie obtenida:', sessionCookie.substring(0, 100));
-  return sessionCookie;
+  const setCookie = r.headers.get('set-cookie') || '';
+  sessionCookie = setCookie.split(',').map(c => c.split(';')[0].trim()).filter(Boolean).join('; ');
+  console.log('Cookie:', sessionCookie.substring(0, 100));
 }
 
 async function fetchAena(tipo) {
-  // Obtener sesión si no la tenemos
   if (!sessionCookie) await getSession();
-  
+
   const flightType = tipo === 'salidas' ? 'D' : 'L';
-  const url = `https://www.aena.es/sites/Satellite?pagename=AENA_ConsultarVuelos&airport=ALC&flightType=${flightType}&dosDias=si`;
   
-  const response = await fetch(url, {
+  // Es POST con parámetros en el body como form data
+  const params = new URLSearchParams({
+    pagename: 'AENA_ConsultarVuelos',
+    airport: 'ALC',
+    flightType: flightType,
+    dosDias: 'si'
+  });
+
+  const response = await fetch('https://www.aena.es/sites/Satellite', {
+    method: 'POST',
     headers: {
-      ...HEADERS_BASE,
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Accept': 'application/json, text/javascript, */*; q=0.01',
+      'Accept-Language': 'es-ES,es;q=0.9',
+      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
       'Referer': 'https://www.aena.es/es/infovuelos.html',
       'X-Requested-With': 'XMLHttpRequest',
-      'Sec-Fetch-Dest': 'empty',
-      'Sec-Fetch-Mode': 'cors',
-      'Sec-Fetch-Site': 'same-origin',
+      'Origin': 'https://www.aena.es',
       'Cookie': sessionCookie
-    }
+    },
+    body: params.toString()
   });
-  
+
   const text = await response.text();
-  console.log('Status vuelos:', response.status, text.substring(0, 100));
-  
+  console.log('Status:', response.status, text.substring(0, 150));
+
   if (!text.trim().startsWith('[') && !text.trim().startsWith('{')) {
-    // Intentar renovar sesión y reintentar
     sessionCookie = '';
-    await getSession();
-    throw new Error(`Respuesta no JSON (${response.status}): ${text.substring(0, 150)}`);
+    throw new Error(`No JSON (${response.status}): ${text.substring(0, 150)}`);
   }
-  
+
   return JSON.parse(text);
 }
 
@@ -153,7 +152,7 @@ app.get('/debug', async (req, res) => {
     const tipo = req.query.tipo || 'salidas';
     const data = await fetchAena(tipo);
     const vy = data.find(v => v.iataCompania === 'VY') || data[0];
-    res.json({ ok: true, campos: Object.keys(vy), ejemplo: vy, cookie: sessionCookie.substring(0, 100) });
+    res.json({ ok: true, campos: Object.keys(vy), ejemplo: vy });
   } catch(e) {
     res.json({ ok: false, error: e.message });
   }
@@ -177,7 +176,6 @@ app.get('/vuelos', async (req, res) => {
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 
-// Obtener sesión al arrancar
 getSession().catch(console.error);
 
 app.listen(PORT, () => console.log(`Puerto ${PORT}`));
