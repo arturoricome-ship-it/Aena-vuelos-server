@@ -20,43 +20,91 @@ async function getBrowser() {
   });
 }
 
-app.get('/debug', async (req, res) => {
+async function scrapAena(tipo) {
   const browser = await getBrowser();
   try {
     const page = await browser.newPage();
     await page.setViewportSize({ width: 1280, height: 800 });
-    await page.goto('https://www.aena.es/es/infovuelos.html?atype=A&airportIata=ALC&airlineIata=VY', { 
+    await page.setExtraHTTPHeaders({ 'Accept-Language': 'es-ES,es;q=0.9' });
+    
+    // Ir a infovuelos base
+    await page.goto('https://www.aena.es/es/infovuelos.html', { 
       waitUntil: 'networkidle', timeout: 30000 
     });
-    await page.waitForTimeout(6000);
+    await page.waitForTimeout(3000);
+
+    const esLlegadas = tipo !== 'salidas';
+
+    // Rellenar el campo de aeropuerto
+    // Llegadas: poner ALC en el campo de llegadas
+    // Salidas: poner ALC en el campo de salidas
+    const inputLabel = esLlegadas ? 'Llegadasen la red Aena:' : 'Salidasen la red Aena:';
     
-    const info = await page.evaluate(() => {
+    try {
+      await page.fill(`input[id="${inputLabel}"]`, 'Alicante');
+      await page.waitForTimeout(1500);
+      // Seleccionar la opción ALC del autocomplete
+      await page.click('.autocomplete-suggestion', { timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(1000);
+    } catch(e) {}
+
+    // Rellenar aerolínea
+    try {
+      const aeroInput = await page.$('input[placeholder*="ABC"]') || await page.$('input[id*="Vuelo"]');
+      if (aeroInput) {
+        await aeroInput.fill('VUELING');
+        await page.waitForTimeout(1000);
+      }
+    } catch(e) {}
+
+    // Pulsar buscar
+    try {
+      await page.click('button[type="submit"], input[type="submit"], .btn-buscar, button.buscar', { timeout: 5000 });
+      await page.waitForTimeout(8000);
+    } catch(e) {}
+
+    // Esperar tabla de resultados
+    await page.waitForSelector('table', { timeout: 15000 }).catch(() => {});
+    await page.waitForTimeout(3000);
+
+    const resultado = await page.evaluate((tipo) => {
       const html = document.body.innerHTML;
       const idxVLG = html.indexOf('VLG');
-      const tablas = Array.from(document.querySelectorAll('table')).map(t => ({
-        clase: t.className,
-        filas: t.querySelectorAll('tr').length,
-        muestra: t.innerHTML.substring(0, 300)
-      }));
-      const divs = Array.from(document.querySelectorAll('[class*="vuelo"],[class*="flight"],[class*="fids"]')).slice(0,5).map(d => ({
-        tag: d.tagName,
-        clase: d.className,
-        muestra: d.innerHTML.substring(0, 300)
-      }));
+      
+      // Intentar extraer filas de tabla
+      const rows = Array.from(document.querySelectorAll('table tr, tbody tr'));
+      const vuelos = [];
+      
+      rows.forEach(row => {
+        const cells = Array.from(row.querySelectorAll('td'));
+        if (cells.length < 3) return;
+        const getText = el => (el.innerText || el.textContent || '').trim();
+        const rowText = getText(row);
+        if (rowText.indexOf('VLG') === -1) return;
+        vuelos.push(cells.map(c => getText(c)));
+      });
+
       return {
-        htmlLen: html.length,
         tieneVLG: idxVLG !== -1,
-        fragmentoVLG: idxVLG !== -1 ? html.substring(Math.max(0,idxVLG-200), idxVLG+400) : 'NO VLG',
-        tablas: tablas,
-        divs: divs
+        fragmento: idxVLG !== -1 ? html.substring(Math.max(0, idxVLG-300), idxVLG+500) : '',
+        vuelos: vuelos,
+        htmlLen: html.length
       };
-    });
-    
-    res.json({ ok: true, info });
-  } catch(e) {
-    res.json({ ok: false, error: e.message });
+    }, tipo);
+
+    return resultado;
   } finally {
     await browser.close();
+  }
+}
+
+app.get('/debug', async (req, res) => {
+  try {
+    const tipo = req.query.tipo || 'llegadas';
+    const data = await scrapAena(tipo);
+    res.json({ ok: true, data });
+  } catch(e) {
+    res.json({ ok: false, error: e.message });
   }
 });
 
@@ -69,35 +117,36 @@ app.get('/vuelos', async (req, res) => {
   }
   
   try {
-    const browser = await getBrowser();
-    const atype = tipo === 'salidas' ? 'D' : 'A';
-    const url = `https://www.aena.es/es/infovuelos.html?atype=${atype}&airportIata=ALC&airlineIata=VY`;
-    const page = await browser.newPage();
-    await page.setViewportSize({ width: 1280, height: 800 });
-    await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForTimeout(5000);
+    const data = await scrapAena(tipo);
     
-    const vuelos = await page.evaluate((tipo) => {
-      const result = [];
-      const selectors = ['table tbody tr','tbody tr','tr'];
-      let rows = [];
-      for (const sel of selectors) {
-        const found = document.querySelectorAll(sel);
-        if (found.length > 2) { rows = Array.from(found); break; }
+    if (!data.vuelos || data.vuelos.length === 0) {
+      return res.json({ ok: false, error: 'No se encontraron vuelos', debug: data });
+    }
+
+    // Parsear celdas según tipo
+    const vuelos = data.vuelos.map(celdas => {
+      if (tipo === 'llegadas') {
+        return {
+          numero: 'VY' + (celdas[1] || '').replace('VLG', '').replace(/\s/g,''),
+          origen: celdas[3] || '',
+          horaProg: (celdas[0] || '').split('\n')[0].trim(),
+          horaReal: (celdas[0] || '').split('\n')[1]?.trim() || '',
+          sala: celdas[5] || '',
+          cinta: celdas[6] || '',
+          estado: celdas[celdas.length - 1] || ''
+        };
+      } else {
+        return {
+          numero: 'VY' + (celdas[1] || '').replace('VLG', '').replace(/\s/g,''),
+          destino: celdas[3] || '',
+          horaProg: (celdas[0] || '').split('\n')[0].trim(),
+          horaReal: (celdas[0] || '').split('\n')[1]?.trim() || '',
+          puerta: celdas[5] || '',
+          estado: celdas[celdas.length - 1] || ''
+        };
       }
-      rows.forEach(row => {
-        const cells = row.querySelectorAll('td');
-        if (cells.length < 3) return;
-        const getText = (el) => el ? (el.innerText || el.textContent || '').trim() : '';
-        const allText = getText(row);
-        if (allText.indexOf('VLG') === -1) return;
-        const cellTexts = Array.from(cells).map(c => getText(c));
-        result.push({ celdas: cellTexts });
-      });
-      return result;
-    }, tipo);
-    
-    await browser.close();
+    });
+
     cache[tipo] = vuelos;
     cache.ts = ahora;
     res.json({ ok: true, vuelos, cached: false });
