@@ -25,74 +25,94 @@ async function scrapAena(tipo) {
   try {
     const page = await browser.newPage();
     await page.setViewportSize({ width: 1280, height: 800 });
-    await page.setExtraHTTPHeaders({ 'Accept-Language': 'es-ES,es;q=0.9' });
-    
-    // Ir a infovuelos base
+
+    // Interceptar todas las respuestas de red para encontrar la API de vuelos
+    let apiData = null;
+    let apiUrl = '';
+
+    page.on('response', async response => {
+      const url = response.url();
+      // Buscar llamadas que contengan datos de vuelos
+      if (url.includes('vuelos') || url.includes('flights') || url.includes('fids') || 
+          url.includes('infovuelos') || url.includes('timetable') || url.includes('schedule')) {
+        try {
+          const ct = response.headers()['content-type'] || '';
+          if (ct.includes('json')) {
+            const text = await response.text();
+            if (text.includes('VLG') || text.includes('vueling') || text.includes('ALC')) {
+              apiData = text;
+              apiUrl = url;
+            }
+          }
+        } catch(e) {}
+      }
+    });
+
     await page.goto('https://www.aena.es/es/infovuelos.html', { 
       waitUntil: 'networkidle', timeout: 30000 
     });
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(2000);
 
+    // Rellenar aeropuerto ALC
     const esLlegadas = tipo !== 'salidas';
-
-    // Rellenar el campo de aeropuerto
-    // Llegadas: poner ALC en el campo de llegadas
-    // Salidas: poner ALC en el campo de salidas
-    const inputLabel = esLlegadas ? 'Llegadasen la red Aena:' : 'Salidasen la red Aena:';
     
-    try {
-      await page.fill(`input[id="${inputLabel}"]`, 'Alicante');
-      await page.waitForTimeout(1500);
-      // Seleccionar la opción ALC del autocomplete
-      await page.click('.autocomplete-suggestion', { timeout: 5000 }).catch(() => {});
-      await page.waitForTimeout(1000);
-    } catch(e) {}
-
-    // Rellenar aerolínea
-    try {
-      const aeroInput = await page.$('input[placeholder*="ABC"]') || await page.$('input[id*="Vuelo"]');
-      if (aeroInput) {
-        await aeroInput.fill('VUELING');
+    // Intentar escribir en el campo correcto
+    const campos = await page.$$('input[type="text"]');
+    for (const campo of campos) {
+      const id = await campo.getAttribute('id') || '';
+      const placeholder = await campo.getAttribute('placeholder') || '';
+      const label = id + placeholder;
+      
+      if (esLlegadas && (label.toLowerCase().includes('llegada') || label.toLowerCase().includes('arrival'))) {
+        await campo.fill('Alicante');
+        await page.waitForTimeout(1500);
+        // Click primera sugerencia
+        const sugerencia = await page.$('.autocomplete-suggestion, .ui-menu-item, [class*="suggestion"], [class*="autocomplete"] li');
+        if (sugerencia) await sugerencia.click();
         await page.waitForTimeout(1000);
+        break;
+      } else if (!esLlegadas && (label.toLowerCase().includes('salida') || label.toLowerCase().includes('departure'))) {
+        await campo.fill('Alicante');
+        await page.waitForTimeout(1500);
+        const sugerencia = await page.$('.autocomplete-suggestion, .ui-menu-item, [class*="suggestion"], [class*="autocomplete"] li');
+        if (sugerencia) await sugerencia.click();
+        await page.waitForTimeout(1000);
+        break;
       }
-    } catch(e) {}
+    }
 
     // Pulsar buscar
-    try {
-      await page.click('button[type="submit"], input[type="submit"], .btn-buscar, button.buscar', { timeout: 5000 });
+    const boton = await page.$('button[type="submit"], .btn-buscar, button.buscar, input[type="submit"]');
+    if (boton) {
+      await boton.click();
       await page.waitForTimeout(8000);
-    } catch(e) {}
+    }
 
-    // Esperar tabla de resultados
-    await page.waitForSelector('table', { timeout: 15000 }).catch(() => {});
-    await page.waitForTimeout(3000);
+    // Si capturamos la API, devolverla
+    if (apiData) {
+      return { method: 'api', apiUrl, apiData: apiData.substring(0, 2000) };
+    }
 
-    const resultado = await page.evaluate((tipo) => {
+    // Si no, ver qué hay en el DOM
+    const domInfo = await page.evaluate(() => {
       const html = document.body.innerHTML;
-      const idxVLG = html.indexOf('VLG');
-      
-      // Intentar extraer filas de tabla
-      const rows = Array.from(document.querySelectorAll('table tr, tbody tr'));
-      const vuelos = [];
-      
-      rows.forEach(row => {
-        const cells = Array.from(row.querySelectorAll('td'));
-        if (cells.length < 3) return;
-        const getText = el => (el.innerText || el.textContent || '').trim();
-        const rowText = getText(row);
-        if (rowText.indexOf('VLG') === -1) return;
-        vuelos.push(cells.map(c => getText(c)));
-      });
-
+      // Buscar cualquier número de vuelo
+      const matches = html.match(/VLG\d+/g) || [];
+      // Ver todas las peticiones de red registradas
+      const scripts = Array.from(document.querySelectorAll('script')).map(s => s.src).filter(s => s);
       return {
-        tieneVLG: idxVLG !== -1,
-        fragmento: idxVLG !== -1 ? html.substring(Math.max(0, idxVLG-300), idxVLG+500) : '',
-        vuelos: vuelos,
-        htmlLen: html.length
+        vlgEncontrados: matches.slice(0, 5),
+        htmlLen: html.length,
+        titulo: document.title,
+        scripts: scripts.slice(0, 5),
+        // Ver si hay datos en algún elemento
+        tablas: Array.from(document.querySelectorAll('table')).length,
+        filas: Array.from(document.querySelectorAll('tr')).length
       };
-    }, tipo);
+    });
 
-    return resultado;
+    return { method: 'dom', domInfo };
+
   } finally {
     await browser.close();
   }
@@ -104,55 +124,12 @@ app.get('/debug', async (req, res) => {
     const data = await scrapAena(tipo);
     res.json({ ok: true, data });
   } catch(e) {
-    res.json({ ok: false, error: e.message });
+    res.json({ ok: false, error: e.message, stack: e.stack });
   }
 });
 
 app.get('/vuelos', async (req, res) => {
-  const tipo = req.query.tipo || 'llegadas';
-  const ahora = Date.now();
-  
-  if (cache[tipo] && (ahora - cache.ts) < CACHE_MS) {
-    return res.json({ ok: true, vuelos: cache[tipo], cached: true });
-  }
-  
-  try {
-    const data = await scrapAena(tipo);
-    
-    if (!data.vuelos || data.vuelos.length === 0) {
-      return res.json({ ok: false, error: 'No se encontraron vuelos', debug: data });
-    }
-
-    // Parsear celdas según tipo
-    const vuelos = data.vuelos.map(celdas => {
-      if (tipo === 'llegadas') {
-        return {
-          numero: 'VY' + (celdas[1] || '').replace('VLG', '').replace(/\s/g,''),
-          origen: celdas[3] || '',
-          horaProg: (celdas[0] || '').split('\n')[0].trim(),
-          horaReal: (celdas[0] || '').split('\n')[1]?.trim() || '',
-          sala: celdas[5] || '',
-          cinta: celdas[6] || '',
-          estado: celdas[celdas.length - 1] || ''
-        };
-      } else {
-        return {
-          numero: 'VY' + (celdas[1] || '').replace('VLG', '').replace(/\s/g,''),
-          destino: celdas[3] || '',
-          horaProg: (celdas[0] || '').split('\n')[0].trim(),
-          horaReal: (celdas[0] || '').split('\n')[1]?.trim() || '',
-          puerta: celdas[5] || '',
-          estado: celdas[celdas.length - 1] || ''
-        };
-      }
-    });
-
-    cache[tipo] = vuelos;
-    cache.ts = ahora;
-    res.json({ ok: true, vuelos, cached: false });
-  } catch (err) {
-    res.json({ ok: false, error: err.message });
-  }
+  res.json({ ok: false, error: 'En desarrollo - usa /debug primero' });
 });
 
 app.get('/health', (req, res) => res.json({ ok: true }));
