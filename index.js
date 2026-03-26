@@ -139,7 +139,13 @@ async function fetchAena(tipo) {
       console.log('networkidle timeout, continuando...');
     });
 
-    await page.waitForTimeout(500);
+    // Esperar a que la red quede en reposo para que el POST de llegadas ya haya terminado
+await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {
+  console.log('networkidle timeout, continuando de todas formas...');
+});
+
+// Pequeña pausa adicional de seguridad
+await page.waitForTimeout(500);
 
     const [response] = await Promise.all([
       page.waitForResponse(
