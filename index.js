@@ -193,3 +193,35 @@ app.get('/health',(req,res)=>res.json({ok:true,age:Math.round((Date.now()-cache.
 cargarTodo().catch(console.error);
 
 app.listen(PORT,()=>console.log(`Puerto ${PORT}`));
+
+app.get('/debug-sal', async (req, res) => {
+  const browser = await chromium.launch({headless:true,args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu']});
+  try{
+    const context = await browser.newContext({userAgent:'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',locale:'es-ES'});
+    const page = await context.newPage();
+    await page.goto('https://www.aena.es/es/infovuelos.html',{waitUntil:'domcontentloaded',timeout:30000});
+    await page.waitForTimeout(3000);
+    const api = context.request;
+    const r = await api.post('https://www.aena.es/sites/Satellite',{
+      headers:{'Accept':'application/json, text/javascript, */*; q=0.01','Content-Type':'application/x-www-form-urlencoded; charset=UTF-8','Referer':'https://www.aena.es/es/infovuelos.html','X-Requested-With':'XMLHttpRequest','Origin':'https://www.aena.es'},
+      data:'pagename=AENA_ConsultarVuelos&airport=ALC&flightType=D&dosDias=si'
+    });
+    const text = await r.text();
+    const hoy = new Date();
+    const hoyStr = String(hoy.getDate()).padStart(2,'0')+'/'+String(hoy.getMonth()+1).padStart(2,'0')+'/'+hoy.getFullYear();
+    let info = {status:r.status(),isJson:text.trim().startsWith('['),preview:text.substring(0,300)};
+    if(text.trim().startsWith('[')){
+      const data = JSON.parse(text);
+      const hoyData = data.filter(v=>v.fecha===hoyStr);
+      const vyData = hoyData.filter(v=>v.iataCompania==='VY');
+      info.total = data.length;
+      info.hoy = hoyData.length;
+      info.vy = vyData.length;
+      info.hoyStr = hoyStr;
+      info.ejemplo = vyData[0]||hoyData[0]||data[0];
+      info.fechasUnicas = [...new Set(data.slice(0,10).map(v=>v.fecha))];
+    }
+    res.json({ok:true,info});
+  }catch(e){res.json({ok:false,error:e.message});}
+  finally{await browser.close();}
+});
