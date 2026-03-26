@@ -25,6 +25,8 @@ const ESTADOS = {
   'BOR': { t: 'Embarcando',        c: 'e-boarding'  },
   'EMB': { t: 'Embarcando',        c: 'e-boarding'  },
   'LST': { t: 'Última llamada',    c: 'e-boarding'  },
+  'ULL': { t: 'Última llamada',    c: 'e-boarding'  },
+  'HOR': { t: 'En hora',            c: 'e-scheduled' },
   'GCL': { t: 'Puerta cerrada',    c: 'e-gate'      },
   'CLO': { t: 'Cerrado',           c: 'e-gate'      },
   'CER': { t: 'Cerrado',           c: 'e-gate'      },
@@ -181,6 +183,18 @@ async function getVuelos(tipo) {
 
 app.get('/health', (req, res) => res.json({ ok: true, session: !!sessionCookie }));
 
+app.get("/buscar", async (req, res) => {
+  try {
+    const tipo = req.query.tipo || "salidas";
+    const num  = req.query.vuelo || "";
+    const data = await fetchAena(tipo === "salidas" ? "S" : "L");
+    const hoy  = new Date();
+    const hoyStr = String(hoy.getDate()).padStart(2,"0")+"/"+String(hoy.getMonth()+1).padStart(2,"0")+"/"+hoy.getFullYear();
+    const encontrado = data.filter(v => v.fecha === hoyStr && v.numVuelo === num);
+    res.json({ ok: true, total: encontrado.length, vuelos: encontrado });
+  } catch(e) { res.json({ ok: false, error: e.message }); }
+});
+
 app.get('/debug', async (req, res) => {
   try {
     const tipo = req.query.tipo || 'llegadas';
@@ -221,3 +235,27 @@ app.get('/vuelos', async (req, res) => {
 
 app.listen(PORT, () => console.log(`[server] Puerto ${PORT}`));
 getSession().catch(err => console.error('[arranque]', err.message));
+
+// Endpoint para ver TODOS los VY/VLG del día, incluyendo los rechazados por el filtro
+app.get('/debug-vy', async (req, res) => {
+  try {
+    const tipo = req.query.tipo || 'salidas';
+    const data = await fetchAena(tipo === 'salidas' ? 'S' : 'L');
+    const hoy = new Date();
+    const hoyStr = String(hoy.getDate()).padStart(2,'0')+'/'+String(hoy.getMonth()+1).padStart(2,'0')+'/'+hoy.getFullYear();
+    // Todos los que tienen iataCompania VY o oaciCompania VLG hoy
+    const todos = data.filter(v => v.fecha === hoyStr && (v.iataCompania === 'VY' || v.oaciCompania === 'VLG'));
+    res.json({
+      ok: true, tipo, hoyStr, total: todos.length,
+      vuelos: todos.map(v => ({
+        num: v.numVuelo,
+        ciudad: v.ciudadIataOtro,
+        iata: v.iataCompania,
+        oaci: v.oaciCompania,
+        codigos: v.codigosCompania,
+        estado: v.estado,
+        puro: esVuelingPuro(v)
+      }))
+    });
+  } catch(e) { res.json({ ok: false, error: e.message }); }
+});
