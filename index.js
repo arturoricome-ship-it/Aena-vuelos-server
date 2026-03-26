@@ -23,6 +23,7 @@ const ESTADOS = {
   'NEW': { t: 'Programado',        c: 'e-scheduled' },
   'OPN': { t: 'Abierto',           c: 'e-boarding'  },
   'BOR': { t: 'Embarcando',        c: 'e-boarding'  },
+  'EMB': { t: 'Embarcando',        c: 'e-boarding'  },
   'LST': { t: 'Última llamada',    c: 'e-boarding'  },
   'GCL': { t: 'Puerta cerrada',    c: 'e-gate'      },
   'CLO': { t: 'Cerrado',           c: 'e-gate'      },
