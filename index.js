@@ -198,12 +198,14 @@ async function getVuelos(tipo) {
         const horaRef = v.horaEstimada || v.horaProgramada || '';
         if (horaRef) {
           const [h, m] = horaRef.substring(0,5).split(':').map(Number);
-          const ahora = new Date();
-          const salidaHoy = new Date(ahora);
-          salidaHoy.setHours(h, m, 0, 0);
+          // Usar hora local de España (Europe/Madrid) para comparar con los datos de AENA
+          const ahoraEspanya = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/Madrid' }));
+          const salidaEspanya = new Date(ahoraEspanya);
+          salidaEspanya.setHours(h, m, 0, 0);
           // Si la hora de salida fue ayer (vuelo nocturno), ajustar
-          if (salidaHoy - ahora > 12 * 60 * 60 * 1000) salidaHoy.setDate(salidaHoy.getDate() - 1);
-          const minutosPasados = (ahora - salidaHoy) / 60000;
+          if (salidaEspanya - ahoraEspanya > 12 * 60 * 60 * 1000) salidaEspanya.setDate(salidaEspanya.getDate() - 1);
+          const minutosPasados = (ahoraEspanya - salidaEspanya) / 60000;
+          console.log(`[15min] VY${v.numVuelo} horaRef=${horaRef} minutos=${minutosPasados.toFixed(1)}`);
           if (minutosPasados >= 15) {
             estado = { t: 'En vuelo', c: 'e-active' };
           }
