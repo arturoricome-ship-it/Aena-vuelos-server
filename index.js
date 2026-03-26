@@ -37,7 +37,7 @@ const ESTADOS = {
   'IBK': { t: 'En vuelo',          c: 'e-active'    },
   'TKO': { t: 'En vuelo',          c: 'e-active'    },
   'OFB': { t: 'En vuelo',          c: 'e-active'    },
-  'INI': { t: 'En vuelo',          c: 'e-active'    },
+  'INI': { t: 'Rodando',           c: 'e-taxiing'   },
   'LND': { t: 'Aterrizado',        c: 'e-landed'    },
   'ARR': { t: 'Aterrizado',        c: 'e-landed'    },
   'REC': { t: 'Aterrizado',        c: 'e-landed'    },
