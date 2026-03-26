@@ -161,10 +161,17 @@ async function getVuelos(tipo) {
       const horaProg = fmtHora(v.horaProgramada);
       const horaEst = fmtHora(v.horaEstimada);
       const ciudad = limpiarCiudad(v.ciudadIataOtro);
+      // BOR en llegadas = Entrega equipaje, en salidas = Embarcando
+      let estadoFinal = estado;
+      if (estadoCod === 'BOR') {
+        estadoFinal = tipo === 'llegadas' 
+          ? { t: 'Entrega equip.', c: 'e-landed' }
+          : { t: 'Embarcando', c: 'e-boarding' };
+      }
       if (tipo === 'llegadas') {
-        return { numero:'VY'+v.numVuelo, origen:ciudad, horaProg, horaReal:horaEst!==horaProg?horaEst:'', sala:v.salaPrimera&&v.salaPrimera!=='null'?v.salaPrimera:'', cinta:v.cintaPrimera&&v.cintaPrimera!=='null'?v.cintaPrimera:'', estado:estado.t, estadoClass:estado.c };
+        return { numero:'VY'+v.numVuelo, origen:ciudad, horaProg, horaReal:horaEst!==horaProg?horaEst:'', sala:v.salaPrimera&&v.salaPrimera!=='null'?v.salaPrimera:'', cinta:v.cintaPrimera&&v.cintaPrimera!=='null'?v.cintaPrimera:'', estado:estadoFinal.t, estadoClass:estadoFinal.c };
       } else {
-        return { numero:'VY'+v.numVuelo, destino:ciudad, horaProg, horaReal:horaEst!==horaProg?horaEst:'', puerta:v.puertaPrimera&&v.puertaPrimera!=='null'?v.puertaPrimera:'', estado:estado.t, estadoClass:estado.c };
+        return { numero:'VY'+v.numVuelo, destino:ciudad, horaProg, horaReal:horaEst!==horaProg?horaEst:'', puerta:v.puertaPrimera&&v.puertaPrimera!=='null'?v.puertaPrimera:'', estado:estadoFinal.t, estadoClass:estadoFinal.c };
       }
     })
     .sort((a,b) => a.horaProg.localeCompare(b.horaProg));
@@ -226,6 +233,20 @@ app.get('/vuelos', async (req, res) => {
 
 app.get('/health', (req, res) => res.json({ ok:true }));
 
-getSession().catch(console.error);
+// Al arrancar, obtener sesión y precargar ambos tipos secuencialmente
+async function init() {
+  await getSession();
+  try {
+    cache.llegadas = await getVuelos('llegadas');
+    await new Promise(r => setTimeout(r, 1000));
+    cache.salidas = await getVuelos('salidas');
+    cache.ts = Date.now();
+    console.log('Cache precargado: llegadas=' + cache.llegadas.length + ' salidas=' + cache.salidas.length);
+  } catch(e) {
+    console.error('Error precargando:', e.message);
+  }
+}
+
+init().catch(console.error);
 
 app.listen(PORT, () => console.log(`Puerto ${PORT}`));
