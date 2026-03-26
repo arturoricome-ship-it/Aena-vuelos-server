@@ -113,12 +113,18 @@ function fmtHora(hora) {
 }
 
 // Vueling puro: codigosCompania solo contiene VY, VLG o vacíos
-// Ejemplo puro:    "VY,VLG,,VY,VY,VLG"
-// Ejemplo codeshare: "IB,IBE,VY,VLG,..." → contiene IB → descartado
+// Y el avión es de la flota real de Vueling (Airbus A320 family)
+// CRJX, ERJ, ATR etc. = Air Nostrum operando para IB con código VY compartido
+const FLOTA_VUELING = ['A319','A320','A321','A32A','A32B','A20N','A21N','A318','A332'];
+
 function esVuelingPuro(v) {
   if (v.iataCompania !== 'VY' || v.oaciCompania !== 'VLG') return false;
   const codigos = (v.codigosCompania || '').split(',').map(s => s.trim()).filter(Boolean);
-  return codigos.every(c => c === 'VY' || c === 'VLG');
+  if (!codigos.every(c => c === 'VY' || c === 'VLG')) return false;
+  // Verificar flota: si el avión no es Airbus A3xx → codeshare encubierto
+  const avion = (v.tipoAeronave || '').toUpperCase().trim();
+  if (avion && !FLOTA_VUELING.some(f => avion.startsWith(f.substring(0,4)))) return false;
+  return true;
 }
 
 function limpiarCiudad(ciudad) {
@@ -176,9 +182,29 @@ async function getVuelos(tipo) {
     const estadoCod = v.estado || 'SCH';
     // Override por tipo si aplica
     const override = tipo === 'llegadas' ? ESTADOS_LLEGADAS[estadoCod] : ESTADOS_SALIDAS[estadoCod];
-    const estado   = override || ESTADOS[estadoCod] || { t: estadoCod, c: 'e-scheduled' };
+    let estado     = override || ESTADOS[estadoCod] || { t: estadoCod, c: 'e-scheduled' };
     const horaProg = fmtHora(v.horaProgramada);
     const horaEst  = fmtHora(v.horaEstimada);
+
+    // Para salidas: si estado es "en tierra" pero la hora estimada pasó hace +15 min → En vuelo
+    if (tipo === 'salidas') {
+      const estadosEnTierra = ['BOR','EMB','ULL','LST','GCL','CLO','CER','OPN'];
+      if (estadosEnTierra.includes(estadoCod)) {
+        const horaRef = v.horaEstimada || v.horaProgramada || '';
+        if (horaRef) {
+          const [h, m] = horaRef.substring(0,5).split(':').map(Number);
+          const ahora = new Date();
+          const salidaHoy = new Date(ahora);
+          salidaHoy.setHours(h, m, 0, 0);
+          // Si la hora de salida fue ayer (vuelo nocturno), ajustar
+          if (salidaHoy - ahora > 12 * 60 * 60 * 1000) salidaHoy.setDate(salidaHoy.getDate() - 1);
+          const minutosPasados = (ahora - salidaHoy) / 60000;
+          if (minutosPasados >= 15) {
+            estado = { t: 'En vuelo', c: 'e-active' };
+          }
+        }
+      }
+    }
     const ciudad   = limpiarCiudad(v.ciudadIataOtro);
     const esManana = v.fecha === mananaStr;
 
