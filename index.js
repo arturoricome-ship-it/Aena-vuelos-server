@@ -169,6 +169,21 @@ async function getVuelos(tipo) {
     .sort((a,b) => a.horaProg.localeCompare(b.horaProg));
 }
 
+app.get('/debug2', async (req, res) => {
+  try {
+    const data = await fetchAena('llegadas');
+    const hoy = new Date();
+    const hoyStr = String(hoy.getDate()).padStart(2,'0')+'/'+String(hoy.getMonth()+1).padStart(2,'0')+'/'+hoy.getFullYear();
+    const hoyData = data.filter(v => v.fecha === hoyStr);
+    // Show all unique airline combinations and status codes
+    const aerolineas = [...new Set(hoyData.map(v => v.iataCompania+'|'+v.oaciCompania+'|'+v.nombreCompania))];
+    const estados = [...new Set(hoyData.map(v => v.estado))];
+    // Show IB/BA flights that might slip through
+    const sospechosos = hoyData.filter(v => v.codigosCompania && (v.codigosCompania.includes('IB') || v.codigosCompania.includes('BA')));
+    res.json({ ok:true, aerolineas, estados, sospechosos: sospechosos.slice(0,3).map(v=>({num:v.numVuelo,iata:v.iataCompania,oaci:v.oaciCompania,nombre:v.nombreCompania,codigos:v.codigosCompania,estado:v.estado})) });
+  } catch(e) { res.json({ ok:false, error:e.message }); }
+});
+
 app.get('/debug', async (req, res) => {
   try {
     const tipo = req.query.tipo || 'llegadas';
