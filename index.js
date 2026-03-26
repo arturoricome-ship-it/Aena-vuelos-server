@@ -186,6 +186,11 @@ async function getVuelos(tipo) {
     const horaProg = fmtHora(v.horaProgramada);
     const horaEst  = fmtHora(v.horaEstimada);
 
+    // Para salidas: Finalizado = ya despegó = En vuelo
+    if (tipo === 'salidas' && ['FNL','FIN'].includes(estadoCod)) {
+      estado = { t: 'En vuelo', c: 'e-active' };
+    }
+
     // Para salidas: si estado es "en tierra" pero la hora estimada pasó hace +15 min → En vuelo
     if (tipo === 'salidas') {
       const estadosEnTierra = ['BOR','EMB','ULL','LST','GCL','CLO','CER','OPN'];
@@ -231,6 +236,12 @@ async function getVuelos(tipo) {
 }
 
 app.get('/health', (req, res) => res.json({ ok: true, session: !!sessionCookie }));
+
+app.get('/refresh', (req, res) => {
+  cache.llegadas = null; cache.salidas = null;
+  cache.ts_llegadas = 0; cache.ts_salidas = 0;
+  res.json({ ok: true, msg: 'Cache limpiado' });
+});
 
 app.get("/buscar", async (req, res) => {
   try {
