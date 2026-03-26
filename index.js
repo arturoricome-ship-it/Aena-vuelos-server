@@ -1,4 +1,5 @@
 const express = require('express');
+const { chromium } = require('playwright');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -28,6 +29,8 @@ const ESTADOS_LLE = {
   'REC':{ t:'Entrega equip.', c:'e-landed' },
   'FNL':{ t:'Finalizado',     c:'e-landed' },
   'FIN':{ t:'Finalizado',     c:'e-landed' },
+  'ENH':{ t:'En hora',        c:'e-scheduled' },
+  'OTH':{ t:'En hora',        c:'e-scheduled' },
   'CAN':{ t:'Cancelado',      c:'e-cancelled' },
   'CNX':{ t:'Cancelado',      c:'e-cancelled' },
   'DIV':{ t:'Desviado',       c:'e-delayed' }
@@ -49,6 +52,7 @@ const ESTADOS_SAL = {
   'LND':{ t:'Finalizado',     c:'e-landed' },
   'FNL':{ t:'Finalizado',     c:'e-landed' },
   'FIN':{ t:'Finalizado',     c:'e-landed' },
+  'ENH':{ t:'En hora',        c:'e-scheduled' },
   'CAN':{ t:'Cancelado',      c:'e-cancelled' },
   'CNX':{ t:'Cancelado',      c:'e-cancelled' },
   'DIV':{ t:'Desviado',       c:'e-delayed' }
@@ -102,44 +106,77 @@ function parsear(data, tipo){
     .sort((a,b)=>a.horaProg.localeCompare(b.horaProg));
 }
 
-async function fetchViaJina(flightType){
-  // Usar Jina AI como proxy para obtener los datos de AENA
-  const aenaUrl = `https://www.aena.es/sites/Satellite?pagename=AENA_ConsultarVuelos&airport=ALC&flightType=${flightType}&dosDias=si`;
-  const jinaUrl = `https://r.jina.ai/${aenaUrl}`;
-  
-  const resp = await fetch(jinaUrl, {
-    headers: {
-      'Accept': 'application/json',
-      'X-Return-Format': 'text'
-    }
-  });
-  const text = await resp.text();
-  console.log(`Jina ${flightType} status:`, resp.status, text.substring(0, 200));
-  
-  // Buscar JSON en la respuesta
-  const jsonMatch = text.match(/\[[\s\S]*\]/);
-  if(jsonMatch){
-    const data = JSON.parse(jsonMatch[0]);
-    console.log(`Jina ${flightType} ok:`, data.length);
-    return data;
-  }
-  return [];
-}
-
 async function cargarTodo(){
-  console.log('Cargando via Jina...');
-  const llegadas = await fetchViaJina('L');
-  await new Promise(r=>setTimeout(r,500));
-  const salidas = await fetchViaJina('D');
-  cache.llegadas = parsear(llegadas,'llegadas');
-  cache.salidas = parsear(salidas,'salidas');
-  cache.ts = Date.now();
-  console.log('VY llegadas:',cache.llegadas.length,'VY salidas:',cache.salidas.length);
+  console.log('Cargando con Playwright APIRequestContext...');
+  const browser = await chromium.launch({
+    headless:true,
+    args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu']
+  });
+  try{
+    const context = await browser.newContext({
+      userAgent:'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      locale:'es-ES'
+    });
+    
+    // Cargar página para obtener cookies
+    const page = await context.newPage();
+    await page.goto('https://www.aena.es/es/infovuelos.html',{waitUntil:'domcontentloaded',timeout:30000});
+    await page.waitForTimeout(3000);
+    
+    // Usar APIRequestContext que comparte cookies con el contexto
+    const api = context.request;
+    
+    const body = 'pagename=AENA_ConsultarVuelos&airport=ALC&dosDias=si';
+    
+    // Llegadas
+    const rLle = await api.post('https://www.aena.es/sites/Satellite', {
+      headers:{
+        'Accept':'application/json, text/javascript, */*; q=0.01',
+        'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8',
+        'Referer':'https://www.aena.es/es/infovuelos.html',
+        'X-Requested-With':'XMLHttpRequest',
+        'Origin':'https://www.aena.es'
+      },
+      data: body + '&flightType=L'
+    });
+    const textLle = await rLle.text();
+    console.log('Llegadas status:', rLle.status(), textLle.substring(0,50));
+    
+    await new Promise(r=>setTimeout(r,1000));
+    
+    // Salidas
+    const rSal = await api.post('https://www.aena.es/sites/Satellite', {
+      headers:{
+        'Accept':'application/json, text/javascript, */*; q=0.01',
+        'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8',
+        'Referer':'https://www.aena.es/es/infovuelos.html',
+        'X-Requested-With':'XMLHttpRequest',
+        'Origin':'https://www.aena.es'
+      },
+      data: body + '&flightType=D'
+    });
+    const textSal = await rSal.text();
+    console.log('Salidas status:', rSal.status(), textSal.substring(0,50));
+    
+    const llegadas = textLle.trim().startsWith('[') ? JSON.parse(textLle) : [];
+    const salidas = textSal.trim().startsWith('[') ? JSON.parse(textSal) : [];
+    
+    console.log('Raw llegadas:', llegadas.length, 'Raw salidas:', salidas.length);
+    
+    cache.llegadas = parsear(llegadas,'llegadas');
+    cache.salidas = parsear(salidas,'salidas');
+    cache.ts = Date.now();
+    
+    console.log('VY llegadas:', cache.llegadas.length, 'VY salidas:', cache.salidas.length);
+    
+  }finally{
+    await browser.close();
+  }
 }
 
-app.get('/vuelos',async(req,res)=>{
-  const tipo=req.query.tipo||'llegadas';
-  const ahora=Date.now();
+app.get('/vuelos', async(req,res)=>{
+  const tipo = req.query.tipo||'llegadas';
+  const ahora = Date.now();
   if((cache.llegadas.length>0||cache.salidas.length>0)&&(ahora-cache.ts)<CACHE_MS){
     return res.json({ok:true,vuelos:tipo==='llegadas'?cache.llegadas:cache.salidas,cached:true});
   }
@@ -151,36 +188,8 @@ app.get('/vuelos',async(req,res)=>{
   }
 });
 
-app.get('/debug',async(req,res)=>{
-  try{
-    const tipo=req.query.tipo||'llegadas';
-    const ft=tipo==='salidas'?'D':'L';
-    const aenaUrl=`https://www.aena.es/sites/Satellite?pagename=AENA_ConsultarVuelos&airport=ALC&flightType=${ft}&dosDias=si`;
-    const jinaUrl=`https://r.jina.ai/${aenaUrl}`;
-    const resp=await fetch(jinaUrl,{headers:{'Accept':'application/json','X-Return-Format':'text'}});
-    const text=await resp.text();
-    res.json({ok:true,status:resp.status,preview:text.substring(0,1000)});
-  }catch(e){res.json({ok:false,error:e.message});}
-});
-
 app.get('/health',(req,res)=>res.json({ok:true,age:Math.round((Date.now()-cache.ts)/1000)+'s',lle:cache.llegadas.length,sal:cache.salidas.length}));
 
 cargarTodo().catch(console.error);
 
 app.listen(PORT,()=>console.log(`Puerto ${PORT}`));
-
-app.get('/jina', async (req, res) => {
-  try {
-    const tipo = req.query.tipo || 'llegadas';
-    const ft = tipo === 'salidas' ? 'D' : 'L';
-    const target = `https://www.aena.es/sites/Satellite?pagename=AENA_ConsultarVuelos&airport=ALC&flightType=${ft}&dosDias=si`;
-    const url = `https://r.jina.ai/${target}`;
-    const r = await fetch(url, {
-      headers: { 'Accept': 'application/json', 'X-Return-Format': 'text' }
-    });
-    const text = await r.text();
-    res.json({ ok: true, status: r.status, preview: text.substring(0, 1000), isJson: text.trim().startsWith('[') });
-  } catch(e) {
-    res.json({ ok: false, error: e.message });
-  }
-});
