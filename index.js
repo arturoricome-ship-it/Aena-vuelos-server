@@ -52,12 +52,6 @@ async function getSession() {
     const page = await context.newPage();
     await page.goto('https://www.aena.es/es/infovuelos.html', { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(3000);
-
-    // Forzamos la vista de salidas una vez para que AENA inicialice correctamente la sesión
-    // y acepte después peticiones con flightType=D.
-    await page.goto('https://www.aena.es/es/infovuelos.html?flightType=D', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-    await page.waitForTimeout(3000);
-
     const cookies = await context.cookies();
     sessionCookie = cookies.map(c => `${c.name}=${c.value}`).join('; ');
     sessionTs = Date.now();
@@ -68,57 +62,61 @@ async function getSession() {
 }
 
 async function fetchAena(tipo) {
-  if (!sessionCookie || (Date.now() - sessionTs) > SESSION_TTL) {
-    await getSession();
-  }
-
   const flightType = tipo === 'salidas' ? 'D' : 'L';
-  const params = new URLSearchParams({ pagename: 'AENA_ConsultarVuelos', airport: 'ALC', flightType, dosDias: 'si' });
 
-  // Pequeña pausa para no saturar AENA
-  await new Promise(r => setTimeout(r, 500));
-  
-  const response = await fetch('https://www.aena.es/sites/Satellite', {
-    method: 'POST',
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'application/json, text/javascript, */*; q=0.01',
-      'Accept-Language': 'es-ES,es;q=0.9',
-      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-      'Referer': 'https://www.aena.es/es/infovuelos.html',
-      'X-Requested-With': 'XMLHttpRequest',
-      'Origin': 'https://www.aena.es',
-      'Cookie': sessionCookie
-    },
-    body: params.toString()
+  console.log(`Fetch AENA ${tipo} con Playwright...`);
+
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
   });
 
-  const text = await response.text();
-
-  if (!text.trim().startsWith('[') && !text.trim().startsWith('{')) {
-    // Renovar y reintentar
-    await getSession();
-    const r2 = await fetch('https://www.aena.es/sites/Satellite', {
-      method: 'POST',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/javascript, */*; q=0.01',
-        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        'Referer': 'https://www.aena.es/es/infovuelos.html',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Origin': 'https://www.aena.es',
-        'Cookie': sessionCookie
-      },
-      body: params.toString()
+  try {
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     });
-    const text2 = await r2.text();
-    if (!text2.trim().startsWith('[') && !text2.trim().startsWith('{')) {
-      throw new Error(`No JSON tras renovar sesión: ${text2.substring(0, 100)}`);
-    }
-    return JSON.parse(text2);
-  }
 
-  return JSON.parse(text);
+    const page = await context.newPage();
+    await page.goto('https://www.aena.es/es/infovuelos.html', {
+      waitUntil: 'domcontentloaded',
+      timeout: 30000
+    });
+    await page.waitForTimeout(3000);
+
+    if (tipo === 'salidas') {
+      console.log('Intentando activar vista de salidas...');
+      await page.getByText('Salidas', { exact: false }).first().click({ timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(2000);
+    }
+
+    const body = new URLSearchParams({
+      pagename: 'AENA_ConsultarVuelos',
+      airport: 'ALC',
+      flightType,
+      dosDias: 'si'
+    }).toString();
+
+    const raw = await page.evaluate(async (body) => {
+      const r = await fetch('/sites/Satellite', {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json, text/javascript, */*; q=0.01',
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          'X-Requested-With': 'XMLHttpRequest'
+        },
+        body
+      });
+      return await r.text();
+    }, body);
+
+    if (!raw.trim().startsWith('[') && !raw.trim().startsWith('{')) {
+      throw new Error(`No JSON desde navegador: ${raw.substring(0, 100)}`);
+    }
+
+    return JSON.parse(raw);
+  } finally {
+    await browser.close();
+  }
 }
 
 function fmtHora(hora) {
