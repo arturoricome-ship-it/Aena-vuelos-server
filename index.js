@@ -1,14 +1,10 @@
 const express = require('express');
-const { chromium } = require('playwright');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 let cache = { llegadas: [], salidas: [], ts: 0 };
 const CACHE_MS = 3 * 60 * 1000;
-let sessionCookie = '';
-let sessionTs = 0;
-const SESSION_TTL = 20 * 60 * 1000;
 
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
@@ -63,7 +59,7 @@ function fmtHora(h){ return h?h.substring(0,5):'--:--'; }
 function limpiarCiudad(ciudad){
   if(!ciudad)return'--';
   const map={
-    'BARCELONA-EL PRAT Josep TARRADELLAS':'Barcelona',
+    'BARCELONA-EL PRAT JOSEP TARRADELLAS':'Barcelona',
     'ADOLFO SUAREZ MADRID-BARAJAS':'Madrid',
     'ADOLFO SUÁREZ MADRID-BARAJAS':'Madrid',
     'MADRID-BARAJAS ADOLFO SUÁREZ':'Madrid',
@@ -106,63 +102,38 @@ function parsear(data, tipo){
     .sort((a,b)=>a.horaProg.localeCompare(b.horaProg));
 }
 
-async function getSession(){
-  console.log('Obteniendo sesión...');
-  const browser=await chromium.launch({headless:true,args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu']});
-  try{
-    const context=await browser.newContext({userAgent:'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',locale:'es-ES'});
-    const page=await context.newPage();
-    await page.goto('https://www.aena.es/es/infovuelos.html',{waitUntil:'domcontentloaded',timeout:30000});
-    await page.waitForTimeout(3000);
-    const cookies=await context.cookies();
-    sessionCookie=cookies.map(c=>`${c.name}=${c.value}`).join('; ');
-    sessionTs=Date.now();
-    console.log('Sesión OK, cookies:',cookies.length);
-  }finally{
-    await browser.close();
-  }
-}
-
-async function fetchVuelos(flightType){
-  if(!sessionCookie||(Date.now()-sessionTs)>SESSION_TTL){
-    await getSession();
-  }
-  const body=`pagename=AENA_ConsultarVuelos&airport=ALC&flightType=${flightType}&dosDias=si`;
-  const headers={
-    'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept':'application/json, text/javascript, */*; q=0.01',
-    'Accept-Language':'es-ES,es;q=0.9',
-    'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8',
-    'Referer':'https://www.aena.es/es/infovuelos.html',
-    'X-Requested-With':'XMLHttpRequest',
-    'Origin':'https://www.aena.es',
-    'Cookie':sessionCookie
-  };
-  let resp=await fetch('https://www.aena.es/sites/Satellite',{method:'POST',headers,body});
-  let text=await resp.text();
-  if(!text.trim().startsWith('[')){
-    console.log(`${flightType} fallo, renovando sesión...`);
-    await getSession();
-    headers['Cookie']=sessionCookie;
-    resp=await fetch('https://www.aena.es/sites/Satellite',{method:'POST',headers,body});
-    text=await resp.text();
-  }
-  if(text.trim().startsWith('[')){
-    const data=JSON.parse(text);
-    console.log(`${flightType} ok:`,data.length);
+async function fetchViaJina(flightType){
+  // Usar Jina AI como proxy para obtener los datos de AENA
+  const aenaUrl = `https://www.aena.es/sites/Satellite?pagename=AENA_ConsultarVuelos&airport=ALC&flightType=${flightType}&dosDias=si`;
+  const jinaUrl = `https://r.jina.ai/${aenaUrl}`;
+  
+  const resp = await fetch(jinaUrl, {
+    headers: {
+      'Accept': 'application/json',
+      'X-Return-Format': 'text'
+    }
+  });
+  const text = await resp.text();
+  console.log(`Jina ${flightType} status:`, resp.status, text.substring(0, 200));
+  
+  // Buscar JSON en la respuesta
+  const jsonMatch = text.match(/\[[\s\S]*\]/);
+  if(jsonMatch){
+    const data = JSON.parse(jsonMatch[0]);
+    console.log(`Jina ${flightType} ok:`, data.length);
     return data;
   }
-  console.log(`${flightType} sin datos:`,text.substring(0,100));
-  return[];
+  return [];
 }
 
 async function cargarTodo(){
-  const llegadas=await fetchVuelos('L');
-  await new Promise(r=>setTimeout(r,1000));
-  const salidas=await fetchVuelos('D');
-  cache.llegadas=parsear(llegadas,'llegadas');
-  cache.salidas=parsear(salidas,'salidas');
-  cache.ts=Date.now();
+  console.log('Cargando via Jina...');
+  const llegadas = await fetchViaJina('L');
+  await new Promise(r=>setTimeout(r,500));
+  const salidas = await fetchViaJina('D');
+  cache.llegadas = parsear(llegadas,'llegadas');
+  cache.salidas = parsear(salidas,'salidas');
+  cache.ts = Date.now();
   console.log('VY llegadas:',cache.llegadas.length,'VY salidas:',cache.salidas.length);
 }
 
@@ -180,8 +151,36 @@ app.get('/vuelos',async(req,res)=>{
   }
 });
 
+app.get('/debug',async(req,res)=>{
+  try{
+    const tipo=req.query.tipo||'llegadas';
+    const ft=tipo==='salidas'?'D':'L';
+    const aenaUrl=`https://www.aena.es/sites/Satellite?pagename=AENA_ConsultarVuelos&airport=ALC&flightType=${ft}&dosDias=si`;
+    const jinaUrl=`https://r.jina.ai/${aenaUrl}`;
+    const resp=await fetch(jinaUrl,{headers:{'Accept':'application/json','X-Return-Format':'text'}});
+    const text=await resp.text();
+    res.json({ok:true,status:resp.status,preview:text.substring(0,1000)});
+  }catch(e){res.json({ok:false,error:e.message});}
+});
+
 app.get('/health',(req,res)=>res.json({ok:true,age:Math.round((Date.now()-cache.ts)/1000)+'s',lle:cache.llegadas.length,sal:cache.salidas.length}));
 
 cargarTodo().catch(console.error);
 
 app.listen(PORT,()=>console.log(`Puerto ${PORT}`));
+
+app.get('/jina', async (req, res) => {
+  try {
+    const tipo = req.query.tipo || 'llegadas';
+    const ft = tipo === 'salidas' ? 'D' : 'L';
+    const target = `https://www.aena.es/sites/Satellite?pagename=AENA_ConsultarVuelos&airport=ALC&flightType=${ft}&dosDias=si`;
+    const url = `https://r.jina.ai/${target}`;
+    const r = await fetch(url, {
+      headers: { 'Accept': 'application/json', 'X-Return-Format': 'text' }
+    });
+    const text = await r.text();
+    res.json({ ok: true, status: r.status, preview: text.substring(0, 1000), isJson: text.trim().startsWith('[') });
+  } catch(e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
