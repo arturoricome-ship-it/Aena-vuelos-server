@@ -62,10 +62,61 @@ async function getSession() {
 }
 
 async function fetchAena(tipo) {
-  const flightType = tipo === 'salidas' ? 'D' : 'L';
+  console.log(`Fetch AENA ${tipo}...`);
 
-  console.log(`Fetch AENA ${tipo} con Playwright...`);
+  // Llegadas: mantenemos tu lógica original
+  if (tipo !== 'salidas') {
+    if (!sessionCookie || (Date.now() - sessionTs) > SESSION_TTL) {
+      await getSession();
+    }
 
+    const params = new URLSearchParams({ pagename: 'AENA_ConsultarVuelos', airport: 'ALC', flightType: 'L', dosDias: 'si' });
+
+    await new Promise(r => setTimeout(r, 500));
+
+    const response = await fetch('https://www.aena.es/sites/Satellite', {
+      method: 'POST',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'Accept-Language': 'es-ES,es;q=0.9',
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'Referer': 'https://www.aena.es/es/infovuelos.html',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Origin': 'https://www.aena.es',
+        'Cookie': sessionCookie
+      },
+      body: params.toString()
+    });
+
+    const text = await response.text();
+
+    if (!text.trim().startsWith('[') && !text.trim().startsWith('{')) {
+      await getSession();
+      const r2 = await fetch('https://www.aena.es/sites/Satellite', {
+        method: 'POST',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'application/json, text/javascript, */*; q=0.01',
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          'Referer': 'https://www.aena.es/es/infovuelos.html',
+          'X-Requested-With': 'XMLHttpRequest',
+          'Origin': 'https://www.aena.es',
+          'Cookie': sessionCookie
+        },
+        body: params.toString()
+      });
+      const text2 = await r2.text();
+      if (!text2.trim().startsWith('[') && !text2.trim().startsWith('{')) {
+        throw new Error(`No JSON tras renovar sesión: ${text2.substring(0, 100)}`);
+      }
+      return JSON.parse(text2);
+    }
+
+    return JSON.parse(text);
+  }
+
+  // Salidas: dejamos de adivinar parámetros y capturamos la petición real que hace la propia web
   const browser = await chromium.launch({
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
@@ -81,36 +132,25 @@ async function fetchAena(tipo) {
       waitUntil: 'domcontentloaded',
       timeout: 30000
     });
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(4000);
 
-    if (tipo === 'salidas') {
-      console.log('Intentando activar vista de salidas...');
-      await page.getByText('Salidas', { exact: false }).first().click({ timeout: 5000 }).catch(() => {});
-      await page.waitForTimeout(2000);
-    }
+    const [response] = await Promise.all([
+      page.waitForResponse(
+        r => r.url().includes('/sites/Satellite') && r.request().method() === 'POST',
+        { timeout: 15000 }
+      ),
+      page.getByText('Salidas', { exact: false }).first().click()
+    ]);
 
-    const body = new URLSearchParams({
-      pagename: 'AENA_ConsultarVuelos',
-      airport: 'ALC',
-      flightType,
-      dosDias: 'si'
-    }).toString();
+    const req = response.request();
+    const postData = req.postData() || '';
+    const raw = await response.text();
 
-    const raw = await page.evaluate(async (body) => {
-      const r = await fetch('/sites/Satellite', {
-        method: 'POST',
-        headers: {
-          'Accept': 'application/json, text/javascript, */*; q=0.01',
-          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-          'X-Requested-With': 'XMLHttpRequest'
-        },
-        body
-      });
-      return await r.text();
-    }, body);
+    console.log('POST real salidas:', postData);
+    console.log('Status real salidas:', response.status());
 
     if (!raw.trim().startsWith('[') && !raw.trim().startsWith('{')) {
-      throw new Error(`No JSON desde navegador: ${raw.substring(0, 100)}`);
+      throw new Error(`No JSON en respuesta real de salidas. POST=${postData} BODY=${raw.substring(0, 120)}`);
     }
 
     return JSON.parse(raw);
