@@ -72,7 +72,7 @@ async function getSession() {
 }
 
 // ─── PETICIÓN DIRECTA A AENA ────────────────────────────────────────────────
-// flightType: 'L' = llegadas, 'D' = salidas (ambos usan el mismo endpoint POST)
+// flightType: 'L' = llegadas, 'S' = salidas (mismo endpoint POST)
 async function fetchAena(flightType) {
   const label = flightType === 'L' ? 'llegadas' : 'salidas';
 
@@ -84,7 +84,7 @@ async function fetchAena(flightType) {
   const params = new URLSearchParams({
     pagename:   'AENA_ConsultarVuelos',
     airport:    'ALC',
-    flightType: flightType,   // 'L' o 'D'
+    flightType: flightType,   // 'L' = llegadas, 'S' = salidas
     dosDias:    'si'
   });
 
@@ -170,7 +170,7 @@ function limpiarCiudad(ciudad) {
 // ─── PROCESAR VUELOS ──────────────────────────────────────────────────────────
 async function getVuelos(tipo) {
   // tipo: 'llegadas' | 'salidas'
-  const flightType = tipo === 'salidas' ? 'D' : 'L';
+  const flightType = tipo === 'salidas' ? 'S' : 'L';
   const data = await fetchAena(flightType);
 
   const hoy = new Date();
@@ -235,7 +235,7 @@ app.get('/health', (req, res) => res.json({ ok: true, session: !!sessionCookie }
 app.get('/debug', async (req, res) => {
   try {
     const tipo = req.query.tipo || 'llegadas';
-    const flightType = tipo === 'salidas' ? 'D' : 'L';
+    const flightType = tipo === 'salidas' ? 'S' : 'L';
     const data = await fetchAena(flightType);
     const hoy = new Date();
     const hoyStr = String(hoy.getDate()).padStart(2,'0')+'/'+String(hoy.getMonth()+1).padStart(2,'0')+'/'+hoy.getFullYear();
