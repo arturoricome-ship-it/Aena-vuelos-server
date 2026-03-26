@@ -148,19 +148,39 @@ async function getVuelos(tipo) {
   const flightType = tipo === 'salidas' ? 'S' : 'L';
   const data = await fetchAena(flightType);
 
-  const hoy = new Date();
-  const hoyStr = String(hoy.getDate()).padStart(2,'0') + '/' +
-                 String(hoy.getMonth()+1).padStart(2,'0') + '/' + hoy.getFullYear();
+  const ahora = new Date();
+  const mostrarManana = ahora.getHours() >= 20;
 
-  const vueling = data.filter(v => esVuelingPuro(v) && v.fecha === hoyStr);
-  console.log(`[vuelos] ${tipo} — total=${data.length} VYpuro=${vueling.length}`);
+  function fechaStr(d) {
+    return String(d.getDate()).padStart(2,'0') + '/' +
+           String(d.getMonth()+1).padStart(2,'0') + '/' + d.getFullYear();
+  }
+  const hoyStr = fechaStr(ahora);
+  const manana = new Date(ahora); manana.setDate(manana.getDate() + 1);
+  const mananaStr = fechaStr(manana);
+
+  const vueling = data.filter(v => {
+    if (!esVuelingPuro(v)) return false;
+    if (v.fecha === hoyStr) return true;
+    if (mostrarManana && v.fecha === mananaStr) return true;
+    return false;
+  });
+
+  console.log(`[vuelos] ${tipo} — total=${data.length} VYpuro=${vueling.length} mañana=${mostrarManana}`);
+
+  // Estados especiales por tipo: INI en llegadas = Programado, en salidas = Rodando
+  const ESTADOS_LLEGADAS = { 'INI': { t: 'Programado', c: 'e-scheduled' } };
+  const ESTADOS_SALIDAS  = { 'INI': { t: 'Rodando',    c: 'e-taxiing'   } };
 
   return vueling.map(v => {
     const estadoCod = v.estado || 'SCH';
-    const estado    = ESTADOS[estadoCod] || { t: estadoCod, c: 'e-scheduled' };
-    const horaProg  = fmtHora(v.horaProgramada);
-    const horaEst   = fmtHora(v.horaEstimada);
-    const ciudad    = limpiarCiudad(v.ciudadIataOtro);
+    // Override por tipo si aplica
+    const override = tipo === 'llegadas' ? ESTADOS_LLEGADAS[estadoCod] : ESTADOS_SALIDAS[estadoCod];
+    const estado   = override || ESTADOS[estadoCod] || { t: estadoCod, c: 'e-scheduled' };
+    const horaProg = fmtHora(v.horaProgramada);
+    const horaEst  = fmtHora(v.horaEstimada);
+    const ciudad   = limpiarCiudad(v.ciudadIataOtro);
+    const esManana = v.fecha === mananaStr;
 
     if (tipo === 'llegadas') {
       return {
@@ -168,17 +188,20 @@ async function getVuelos(tipo) {
         horaReal: horaEst !== horaProg ? horaEst : '',
         sala:  (v.salaPrimera  && v.salaPrimera  !== 'null') ? v.salaPrimera  : '',
         cinta: (v.cintaPrimera && v.cintaPrimera !== 'null') ? v.cintaPrimera : '',
-        estado: estado.t, estadoClass: estado.c, estadoCod
+        estado: estado.t, estadoClass: estado.c, estadoCod, esManana
       };
     } else {
       return {
         numero: 'VY' + v.numVuelo, destino: ciudad, horaProg,
         horaReal: horaEst !== horaProg ? horaEst : '',
         puerta: (v.puertaPrimera && v.puertaPrimera !== 'null') ? v.puertaPrimera : '',
-        estado: estado.t, estadoClass: estado.c, estadoCod
+        estado: estado.t, estadoClass: estado.c, estadoCod, esManana
       };
     }
-  }).sort((a, b) => a.horaProg.localeCompare(b.horaProg));
+  }).sort((a, b) => {
+    if (a.esManana !== b.esManana) return a.esManana ? 1 : -1;
+    return a.horaProg.localeCompare(b.horaProg);
+  });
 }
 
 app.get('/health', (req, res) => res.json({ ok: true, session: !!sessionCookie }));
