@@ -181,3 +181,24 @@ app.get('/health', (req, res) => res.json({ ok:true, cached: cache.ts > 0, age: 
 cargarTodo().catch(console.error);
 
 app.listen(PORT, () => console.log(`Puerto ${PORT}`));
+
+app.get('/debug', async (req, res) => {
+  try {
+    const browser = await chromium.launch({ headless:true, args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage'] });
+    const context = await browser.newContext({ userAgent:'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' });
+    const page = await context.newPage();
+    await page.goto('https://www.aena.es/es/infovuelos.html', { waitUntil:'domcontentloaded', timeout:30000 });
+    await page.waitForTimeout(3000);
+    const result = await page.evaluate(async () => {
+      const r = await fetch('https://www.aena.es/sites/Satellite', {
+        method:'POST',
+        headers:{ 'Accept':'application/json, text/javascript, */*; q=0.01', 'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8', 'Referer':'https://www.aena.es/es/infovuelos.html', 'X-Requested-With':'XMLHttpRequest' },
+        body:'pagename=AENA_ConsultarVuelos&airport=ALC&flightType=D&dosDias=si'
+      });
+      const text = await r.text();
+      return { status: r.status, preview: text.substring(0,500), isJson: text.startsWith('[') };
+    });
+    await browser.close();
+    res.json({ ok:true, result });
+  } catch(e) { res.json({ ok:false, error:e.message }); }
+});
