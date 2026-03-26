@@ -20,15 +20,20 @@ const ESTADOS = {
   'GCL': { t: 'Puerta cerrada', c: 'e-gate' },
   'DEP': { t: 'En vuelo',       c: 'e-active' },
   'AIR': { t: 'En vuelo',       c: 'e-active' },
+  'FLY': { t: 'En vuelo',       c: 'e-active' },
+  'IBK': { t: 'En vuelo',       c: 'e-active' },
+  'TKO': { t: 'En vuelo',       c: 'e-active' },
   'LND': { t: 'Aterrizado',     c: 'e-landed' },
   'ARR': { t: 'Aterrizado',     c: 'e-landed' },
+  'EQP': { t: 'Aterrizado',     c: 'e-landed' },
+  'REC': { t: 'Aterrizado',     c: 'e-landed' },
+  'FIN': { t: 'Finalizado',     c: 'e-landed' },
+  'CER': { t: 'Cerrado',        c: 'e-gate' },
+  'CLO': { t: 'Cerrado',        c: 'e-gate' },
   'CAN': { t: 'Cancelado',      c: 'e-cancelled' },
-  'IBK': { t: 'En vuelo',       c: 'e-active' },
   'CNX': { t: 'Cancelado',      c: 'e-cancelled' },
   'DIV': { t: 'Desviado',       c: 'e-delayed' },
-  'FLY': { t: 'En vuelo',       c: 'e-active' },
-  'TKO': { t: 'En vuelo',       c: 'e-active' },
-  'OFB': { t: 'Fuera de puerta',c: 'e-active' }
+  'OFB': { t: 'En vuelo',       c: 'e-active' }
 };
 
 async function getSession() {
@@ -41,22 +46,17 @@ async function getSession() {
   });
   const setCookie = r.headers.get('set-cookie') || '';
   sessionCookie = setCookie.split(',').map(c => c.split(';')[0].trim()).filter(Boolean).join('; ');
-  console.log('Cookie:', sessionCookie.substring(0, 100));
 }
 
 async function fetchAena(tipo) {
   if (!sessionCookie) await getSession();
-
   const flightType = tipo === 'salidas' ? 'D' : 'L';
-  
-  // Es POST con parámetros en el body como form data
   const params = new URLSearchParams({
     pagename: 'AENA_ConsultarVuelos',
     airport: 'ALC',
     flightType: flightType,
     dosDias: 'si'
   });
-
   const response = await fetch('https://www.aena.es/sites/Satellite', {
     method: 'POST',
     headers: {
@@ -71,15 +71,11 @@ async function fetchAena(tipo) {
     },
     body: params.toString()
   });
-
   const text = await response.text();
-  console.log('Status:', response.status, text.substring(0, 150));
-
   if (!text.trim().startsWith('[') && !text.trim().startsWith('{')) {
     sessionCookie = '';
-    throw new Error(`No JSON (${response.status}): ${text.substring(0, 150)}`);
+    throw new Error(`No JSON (${response.status}): ${text.substring(0, 100)}`);
   }
-
   return JSON.parse(text);
 }
 
@@ -94,6 +90,7 @@ function limpiarCiudad(ciudad) {
     'BARCELONA-EL PRAT JOSEP TARRADELLAS': 'Barcelona',
     'ADOLFO SUAREZ MADRID-BARAJAS': 'Madrid',
     'ADOLFO SUÁREZ MADRID-BARAJAS': 'Madrid',
+    'MADRID-BARAJAS ADOLFO SUÁREZ': 'Madrid',
     'TENERIFE NORTE-C. LA LAGUNA': 'Tenerife Norte',
     'TENERIFE SUR-REINA SOFIA': 'Tenerife Sur',
     'PARIS /ORLY': 'París Orly',
@@ -102,12 +99,14 @@ function limpiarCiudad(ciudad) {
     'LONDON /HEATHROW': 'Londres Heathrow',
     'LONDON /STANSTED': 'Londres Stansted',
     'AMSTERDAM /SCHIPHOL': 'Ámsterdam',
-    'BRUSELAS': 'Bruselas'
+    'BRUSELAS': 'Bruselas',
+    'EAST MIDLANDS': 'East Midlands',
+    'BRATISLAVA/M.R. STEFANIK AIRPORT': 'Bratislava'
   };
   for (const [k, v] of Object.entries(map)) {
-    if (ciudad.includes(k)) return v;
+    if (ciudad.toUpperCase().includes(k.toUpperCase())) return v;
   }
-  return ciudad.split(' /')[0].trim()
+  return ciudad.split(' /')[0].split(' -')[0].trim()
     .split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
 }
 
@@ -118,9 +117,17 @@ async function getVuelos(tipo) {
     String(hoy.getMonth()+1).padStart(2,'0') + '/' + hoy.getFullYear();
 
   return data
-    .filter(v => v.iataCompania === 'VY' && v.fecha === hoyStr)
+    .filter(v => {
+      // Solo Vueling puro: iataCompania=VY Y oaciCompania=VLG (sin codeshared de IB u otros)
+      if (v.iataCompania !== 'VY') return false;
+      if (v.oaciCompania !== 'VLG') return false;
+      // Solo hoy
+      if (v.fecha !== hoyStr) return false;
+      return true;
+    })
     .map(v => {
-      const estado = ESTADOS[v.estado] || { t: v.estado || 'Programado', c: 'e-scheduled' };
+      const estadoCod = v.estado || 'SCH';
+      const estado = ESTADOS[estadoCod] || { t: estadoCod, c: 'e-scheduled' };
       const horaProg = fmtHora(v.horaProgramada);
       const horaEst = fmtHora(v.horaEstimada);
       const ciudad = limpiarCiudad(v.ciudadIataOtro);
@@ -130,8 +137,8 @@ async function getVuelos(tipo) {
           origen: ciudad,
           horaProg,
           horaReal: horaEst !== horaProg ? horaEst : '',
-          sala: v.salaPrimera || '',
-          cinta: (v.cintaPrimera && v.cintaPrimera !== 'null') ? v.cintaPrimera : '',
+          sala: v.salaPrimera && v.salaPrimera !== 'null' ? v.salaPrimera : '',
+          cinta: v.cintaPrimera && v.cintaPrimera !== 'null' ? v.cintaPrimera : '',
           estado: estado.t,
           estadoClass: estado.c
         };
@@ -141,7 +148,7 @@ async function getVuelos(tipo) {
           destino: ciudad,
           horaProg,
           horaReal: horaEst !== horaProg ? horaEst : '',
-          puerta: (v.puertaPrimera && v.puertaPrimera !== 'null') ? v.puertaPrimera : '',
+          puerta: v.puertaPrimera && v.puertaPrimera !== 'null' ? v.puertaPrimera : '',
           estado: estado.t,
           estadoClass: estado.c
         };
@@ -154,8 +161,11 @@ app.get('/debug', async (req, res) => {
   try {
     const tipo = req.query.tipo || 'salidas';
     const data = await fetchAena(tipo);
-    const vy = data.find(v => v.iataCompania === 'VY') || data[0];
-    res.json({ ok: true, campos: Object.keys(vy), ejemplo: vy });
+    const hoy = new Date();
+    const hoyStr = String(hoy.getDate()).padStart(2,'0') + '/' + String(hoy.getMonth()+1).padStart(2,'0') + '/' + hoy.getFullYear();
+    const hoyData = data.filter(v => v.fecha === hoyStr);
+    const vy = hoyData.find(v => v.iataCompania === 'VY');
+    res.json({ ok: true, hoyStr, totalHoy: hoyData.length, vyHoy: hoyData.filter(v=>v.iataCompania==='VY').length, ejemplo: vy });
   } catch(e) {
     res.json({ ok: false, error: e.message });
   }
