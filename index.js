@@ -116,7 +116,7 @@ async function fetchAena(tipo) {
     return JSON.parse(text);
   }
 
-  // Salidas: dejamos de adivinar parámetros y capturamos la petición real que hace la propia web
+  // Salidas: capturamos la petición real que hace la propia web al hacer clic en Salidas.
   const browser = await chromium.launch({
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
@@ -128,16 +128,23 @@ async function fetchAena(tipo) {
     });
 
     const page = await context.newPage();
+
     await page.goto('https://www.aena.es/es/infovuelos.html', {
       waitUntil: 'domcontentloaded',
       timeout: 30000
     });
-    await page.waitForTimeout(4000);
+
+    // Esperamos a que terminen los requests iniciales para no capturar el POST de llegadas
+    await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {
+      console.log('networkidle timeout, continuando...');
+    });
+
+    await page.waitForTimeout(500);
 
     const [response] = await Promise.all([
       page.waitForResponse(
         r => r.url().includes('/sites/Satellite') && r.request().method() === 'POST',
-        { timeout: 15000 }
+        { timeout: 20000 }
       ),
       page.getByText('Salidas', { exact: false }).first().click()
     ]);
