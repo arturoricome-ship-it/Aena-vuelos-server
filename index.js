@@ -69,6 +69,9 @@ async function fetchAena(tipo) {
   const flightType = tipo === 'salidas' ? 'D' : 'L';
   const params = new URLSearchParams({ pagename: 'AENA_ConsultarVuelos', airport: 'ALC', flightType, dosDias: 'si' });
 
+  // Pequeña pausa para no saturar AENA
+  await new Promise(r => setTimeout(r, 500));
+  
   const response = await fetch('https://www.aena.es/sites/Satellite', {
     method: 'POST',
     headers: {
@@ -185,6 +188,17 @@ app.get('/vuelos', async (req, res) => {
   const ahora = Date.now();
   if (cache[tipo] && (ahora-cache.ts) < CACHE_MS) return res.json({ ok:true, vuelos:cache[tipo], cached:true });
   try {
+    // Si necesitamos renovar sesión, precargamos ambos tipos secuencialmente
+    if (!sessionCookie || (Date.now()-sessionTs) > SESSION_TTL) {
+      await getSession();
+      const vLle = await getVuelos('llegadas');
+      cache.llegadas = vLle;
+      await new Promise(r => setTimeout(r, 1000));
+      const vSal = await getVuelos('salidas');
+      cache.salidas = vSal;
+      cache.ts = Date.now();
+      return res.json({ ok:true, vuelos: tipo==='llegadas'?vLle:vSal, cached:false, total:(tipo==='llegadas'?vLle:vSal).length });
+    }
     const vuelos = await getVuelos(tipo);
     cache[tipo] = vuelos;
     cache.ts = ahora;
