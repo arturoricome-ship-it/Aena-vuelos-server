@@ -144,12 +144,16 @@ async function cargarTodo(){
     
     await new Promise(r=>setTimeout(r,1000));
     
+    // Navegar a página de salidas para que AENA establezca el contexto correcto
+    await page.goto('https://www.aena.es/es/infovuelos.html?atype=D&airportIata=ALC&airlineIata=VY',{waitUntil:'domcontentloaded',timeout:30000});
+    await page.waitForTimeout(2000);
+    
     // Salidas
     const rSal = await api.post('https://www.aena.es/sites/Satellite', {
       headers:{
         'Accept':'application/json, text/javascript, */*; q=0.01',
         'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8',
-        'Referer':'https://www.aena.es/es/infovuelos.html',
+        'Referer':'https://www.aena.es/es/infovuelos.html?atype=D&airportIata=ALC&airlineIata=VY',
         'X-Requested-With':'XMLHttpRequest',
         'Origin':'https://www.aena.es'
       },
