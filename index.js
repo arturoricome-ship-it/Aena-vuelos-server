@@ -17,48 +17,36 @@ app.use((req, res, next) => {
   next();
 });
 
-// Estados específicos para LLEGADAS
-const ESTADOS_L = {
+const ESTADOS = {
   'SCH': { t: 'Programado',        c: 'e-scheduled' },
-  'INI': { t: 'Programado',        c: 'e-scheduled' }, // pendiente confirmar
-  'UNI': { t: 'Programado',        c: 'e-scheduled' }, // pendiente confirmar
-  'TX':  { t: 'Programado',        c: 'e-scheduled' }, // Rodando → mostramos Programado
-  'FLY': { t: 'En vuelo',          c: 'e-active'    },
-  'IBK': { t: 'Aproximándose',     c: 'e-active'    },
-  'LND': { t: 'Aterrizado',        c: 'e-landed'    },
-  'BOR': { t: 'Entrega equipajes', c: 'e-equip'     },
-  'FNL': { t: 'Finalizado',        c: 'e-final'     },
   'DEL': { t: 'Retrasado',         c: 'e-delayed'   },
-  'CAN': { t: 'Cancelado',         c: 'e-cancelled' },
-  'CNX': { t: 'Cancelado',         c: 'e-cancelled' },
-  'DIV': { t: 'Desviado',          c: 'e-delayed'   },
+  'NEW': { t: 'Programado',        c: 'e-scheduled' },
+  'OPN': { t: 'Abierto',           c: 'e-boarding'  },
+  'BOR': { t: 'Embarcando',        c: 'e-boarding'  },
+  'EMB': { t: 'Embarcando',        c: 'e-boarding'  },
+  'LST': { t: 'Última llamada',    c: 'e-boarding'  },
+  'ULL': { t: 'Última llamada',    c: 'e-boarding'  },
+  'HOR': { t: 'En hora',            c: 'e-scheduled' },
+  'GCL': { t: 'Puerta cerrada',    c: 'e-gate'      },
+  'CLO': { t: 'Cerrado',           c: 'e-gate'      },
+  'CER': { t: 'Cerrado',           c: 'e-gate'      },
+  'TXI': { t: 'Rodando',           c: 'e-active'    },
+  'DEP': { t: 'En vuelo',          c: 'e-active'    },
+  'AIR': { t: 'En vuelo',          c: 'e-active'    },
+  'FLY': { t: 'En vuelo',          c: 'e-active'    },
+  'IBK': { t: 'En vuelo',          c: 'e-active'    },
+  'TKO': { t: 'En vuelo',          c: 'e-active'    },
+  'OFB': { t: 'En vuelo',          c: 'e-active'    },
+  'INI': { t: 'Rodando',           c: 'e-taxiing'   },
+  'LND': { t: 'Aterrizado',        c: 'e-landed'    },
   'ARR': { t: 'Aterrizado',        c: 'e-landed'    },
   'REC': { t: 'Aterrizado',        c: 'e-landed'    },
   'EQP': { t: 'Entrega equipajes', c: 'e-equip'     },
-  'FIN': { t: 'Finalizado',        c: 'e-final'     },
-};
-
-// Estados específicos para SALIDAS
-const ESTADOS_S = {
-  'SCH': { t: 'Programado',        c: 'e-scheduled' },
-  'INI': { t: 'Programado',        c: 'e-scheduled' }, // pendiente confirmar
-  'UNI': { t: 'Programado',        c: 'e-scheduled' }, // pendiente confirmar
-  'TX':  { t: 'Programado',        c: 'e-scheduled' }, // Rodando → mostramos Programado
-  'BOR': { t: 'Embarque',          c: 'e-boarding'  },
-  'ULL': { t: 'Última llamada',    c: 'e-boarding'  },
-  'GCL': { t: 'Cerrado',           c: 'e-gate'      },
-  'FLY': { t: 'Despegado',         c: 'e-active'    },
   'FNL': { t: 'Finalizado',        c: 'e-final'     },
-  'DEL': { t: 'Retrasado',         c: 'e-delayed'   },
+  'FIN': { t: 'Finalizado',        c: 'e-final'     },
   'CAN': { t: 'Cancelado',         c: 'e-cancelled' },
   'CNX': { t: 'Cancelado',         c: 'e-cancelled' },
-  'DIV': { t: 'Desviado',          c: 'e-delayed'   },
-  'OPN': { t: 'Abierto',           c: 'e-boarding'  },
-  'EMB': { t: 'Embarque',          c: 'e-boarding'  },
-  'LST': { t: 'Última llamada',    c: 'e-boarding'  },
-  'CLO': { t: 'Cerrado',           c: 'e-gate'      },
-  'CER': { t: 'Cerrado',           c: 'e-gate'      },
-  'FIN': { t: 'Finalizado',        c: 'e-final'     },
+  'DIV': { t: 'Desviado',          c: 'e-delayed'   }
 };
 
 async function getSession() {
@@ -186,13 +174,41 @@ async function getVuelos(tipo) {
 
   console.log(`[vuelos] ${tipo} — total=${data.length} VYpuro=${vueling.length} mañana=${mostrarManana}`);
 
-  const MAPA = tipo === 'llegadas' ? ESTADOS_L : ESTADOS_S;
+  // Estados especiales por tipo: INI en llegadas = Programado, en salidas = Rodando
+  const ESTADOS_LLEGADAS = { 'INI': { t: 'Programado', c: 'e-scheduled' } };
+  const ESTADOS_SALIDAS  = { 'INI': { t: 'Rodando',    c: 'e-taxiing'   } };
 
   return vueling.map(v => {
     const estadoCod = v.estado || 'SCH';
-    let estado = MAPA[estadoCod] || { t: estadoCod, c: 'e-scheduled' };
+    // Override por tipo si aplica
+    const override = tipo === 'llegadas' ? ESTADOS_LLEGADAS[estadoCod] : ESTADOS_SALIDAS[estadoCod];
+    let estado     = override || ESTADOS[estadoCod] || { t: estadoCod, c: 'e-scheduled' };
     const horaProg = fmtHora(v.horaProgramada);
     const horaEst  = fmtHora(v.horaEstimada);
+
+    // Para llegadas: si estado es "en vuelo" pero hora estimada pasó hace +15 min → Entrega equipajes
+    if (tipo === 'llegadas') {
+      const estadosEnVuelo = ['IBK','FLY','AIR','DEP','OFB','TKO','INI'];
+      if (estadosEnVuelo.includes(estadoCod)) {
+        const horaRef = v.horaEstimada || v.horaProgramada || '';
+        if (horaRef) {
+          const [h, m] = horaRef.substring(0,5).split(':').map(Number);
+          const ahoraEspanya = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/Madrid' }));
+          const llegadaEspanya = new Date(ahoraEspanya);
+          llegadaEspanya.setHours(h, m, 0, 0);
+          if (llegadaEspanya - ahoraEspanya > 12 * 60 * 60 * 1000) llegadaEspanya.setDate(llegadaEspanya.getDate() - 1);
+          const minutosPasados = (ahoraEspanya - llegadaEspanya) / 60000;
+          if (minutosPasados >= 15) {
+            estado = { t: 'Entrega equipajes', c: 'e-equip' };
+          }
+        }
+      }
+    }
+
+    // Para salidas: Finalizado = ya despegó = En vuelo
+    if (tipo === 'salidas' && ['FNL','FIN'].includes(estadoCod)) {
+      estado = { t: 'En vuelo', c: 'e-active' };
+    }
 
     // Para salidas: si estado es "en tierra" pero la hora estimada pasó hace +15 min → En vuelo
     if (tipo === 'salidas') {
