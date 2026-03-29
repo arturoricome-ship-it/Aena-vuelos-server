@@ -155,15 +155,15 @@ async function getVuelos(tipo) {
   const flightType = tipo === 'salidas' ? 'S' : 'L';
   const data = await fetchAena(flightType);
 
-  const ahora = new Date();
-  const mostrarManana = ahora.getHours() >= 20;
+  const ahoraES = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/Madrid' }));
+  const mostrarManana = ahoraES.getHours() >= 20;
 
   function fechaStr(d) {
     return String(d.getDate()).padStart(2,'0') + '/' +
            String(d.getMonth()+1).padStart(2,'0') + '/' + d.getFullYear();
   }
-  const hoyStr = fechaStr(ahora);
-  const manana = new Date(ahora); manana.setDate(manana.getDate() + 1);
+  const hoyStr = fechaStr(ahoraES);
+  const manana = new Date(ahoraES); manana.setDate(manana.getDate() + 1);
   const mananaStr = fechaStr(manana);
 
   const vueling = data.filter(v => {
