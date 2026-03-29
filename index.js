@@ -20,6 +20,7 @@ app.use((req, res, next) => {
 const ESTADOS = {
   'SCH': { t: 'Programado',        c: 'e-scheduled' },
   'DEL': { t: 'Retrasado',         c: 'e-delayed'   },
+  'RET': { t: 'Retrasado',         c: 'e-delayed'   },
   'NEW': { t: 'Programado',        c: 'e-scheduled' },
   'OPN': { t: 'Abierto',           c: 'e-boarding'  },
   'BOR': { t: 'Embarcando',        c: 'e-boarding'  },
@@ -188,7 +189,7 @@ async function getVuelos(tipo) {
 
     // Para llegadas: si estado es "en vuelo" pero hora estimada pasó hace +15 min → Entrega equipajes
     if (tipo === 'llegadas') {
-      const estadosEnVuelo = ['IBK','FLY','AIR','DEP','OFB','TKO','INI'];
+      const estadosEnVuelo = ['IBK','FLY','AIR','DEP','OFB','TKO','INI','BOR','EMB','ULL','LST','GCL','CLO','CER','OPN','TXI'];
       if (estadosEnVuelo.includes(estadoCod)) {
         const horaRef = v.horaEstimada || v.horaProgramada || '';
         if (horaRef) {
