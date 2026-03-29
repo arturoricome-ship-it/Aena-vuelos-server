@@ -199,7 +199,9 @@ async function getVuelos(tipo) {
           llegadaEspanya.setHours(h, m, 0, 0);
           if (llegadaEspanya - ahoraEspanya > 12 * 60 * 60 * 1000) llegadaEspanya.setDate(llegadaEspanya.getDate() - 1);
           const minutosPasados = (ahoraEspanya - llegadaEspanya) / 60000;
-          if (minutosPasados >= 15) {
+          if (minutosPasados >= 35) {
+            estado = { t: 'Finalizado', c: 'e-final' };
+          } else if (minutosPasados >= 15) {
             estado = { t: 'Entrega equipajes', c: 'e-equip' };
           }
         }
