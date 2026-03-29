@@ -176,7 +176,7 @@ async function getVuelos(tipo) {
 
   // Estados especiales por tipo: INI en llegadas = Programado, en salidas = Rodando
   const ESTADOS_LLEGADAS = { 'INI': { t: 'Programado', c: 'e-scheduled' } };
-  const ESTADOS_SALIDAS  = { 'INI': { t: 'Rodando',    c: 'e-taxiing'   } };
+  const ESTADOS_SALIDAS  = { 'INI': { t: 'Programado', c: 'e-scheduled'  } };
 
   return vueling.map(v => {
     const estadoCod = v.estado || 'SCH';
