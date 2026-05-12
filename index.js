@@ -11,6 +11,11 @@ let sessionCookie = '';
 let sessionTs = 0;
 const SESSION_TTL = 20 * 60 * 1000;
 
+const SHEETS_WEBHOOK_URL = process.env.SHEETS_WEBHOOK_URL || '';
+const SHEETS_TOKEN = process.env.SHEETS_TOKEN || '';
+let historicoRunning = false;
+let lastHistoricoRunKey = '';
+
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Headers', 'Content-Type');
@@ -113,16 +118,12 @@ function fmtHora(hora) {
   return hora.substring(0, 5);
 }
 
-// Vueling puro: codigosCompania solo contiene VY, VLG o vacíos
-// Y el avión es de la flota real de Vueling (Airbus A320 family)
-// CRJX, ERJ, ATR etc. = Air Nostrum operando para IB con código VY compartido
 const FLOTA_VUELING = ['A319','A320','A321','A32A','A32B','A20N','A21N','A318','A332'];
 
 function esVuelingPuro(v) {
   if (v.iataCompania !== 'VY' || v.oaciCompania !== 'VLG') return false;
   const codigos = (v.codigosCompania || '').split(',').map(s => s.trim()).filter(Boolean);
   if (!codigos.every(c => c === 'VY' || c === 'VLG')) return false;
-  // Verificar flota: si el avión no es Airbus A3xx → codeshare encubierto
   const avion = (v.tipoAeronave || '').toUpperCase().trim();
   if (avion && !FLOTA_VUELING.some(f => avion.startsWith(f.substring(0,4)))) return false;
   return true;
@@ -151,20 +152,129 @@ function limpiarCiudad(ciudad) {
     .split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
 }
 
+function madridDate(offsetDays = 0) {
+  const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/Madrid' }));
+  d.setDate(d.getDate() + offsetDays);
+  return d;
+}
+
+function fechaAena(d) {
+  return String(d.getDate()).padStart(2,'0') + '/' + String(d.getMonth()+1).padStart(2,'0') + '/' + d.getFullYear();
+}
+
+function fechaISO(d) {
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
+
+function fechaHoraMadridISO() {
+  const d = madridDate(0);
+  return fechaISO(d) + ' ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+}
+
+function horaVuelo(v) {
+  const hora = (v.horaProgramada || v.horaEstimada || '').substring(0, 5);
+  const h = Number(hora.substring(0, 2));
+  return Number.isFinite(h) && h >= 0 && h <= 23 ? h : null;
+}
+
+function calcularResumenHistorico({ salidasRaw, llegadasRaw, fechaObjetivo, estado }) {
+  const salidas = salidasRaw.filter(v => v.fecha === fechaObjetivo.aena && esVuelingPuro(v));
+  const llegadas = llegadasRaw.filter(v => v.fecha === fechaObjetivo.aena && esVuelingPuro(v));
+  const porHora = Array.from({ length: 24 }, () => 0);
+
+  for (const v of salidas.concat(llegadas)) {
+    const h = horaVuelo(v);
+    if (h !== null) porHora[h] += 1;
+  }
+
+  let picoIndex = 0;
+  for (let i = 1; i < porHora.length; i++) {
+    if (porHora[i] > porHora[picoIndex]) picoIndex = i;
+  }
+
+  return {
+    fecha: fechaObjetivo.iso,
+    total_vuelos: salidas.length + llegadas.length,
+    salidas: salidas.length,
+    llegadas: llegadas.length,
+    por_hora: porHora,
+    pico_hora: String(picoIndex).padStart(2, '0') + ':00',
+    actualizado: fechaHoraMadridISO(),
+    estado
+  };
+}
+
+async function enviarResumenSheets(resumen) {
+  if (!SHEETS_WEBHOOK_URL || !SHEETS_TOKEN) {
+    throw new Error('Faltan SHEETS_WEBHOOK_URL o SHEETS_TOKEN');
+  }
+
+  const payload = { token: SHEETS_TOKEN, ...resumen };
+  const res = await fetch(SHEETS_WEBHOOK_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const text = await res.text();
+  console.log(`[sheets] status=${res.status} body=${text.substring(0, 180)}`);
+  if (!res.ok) throw new Error(`Sheets HTTP ${res.status}: ${text.substring(0, 180)}`);
+  return text;
+}
+
+async function guardarHistoricoVuelos(offsetDays, estado) {
+  const d = madridDate(offsetDays);
+  const fechaObjetivo = { iso: fechaISO(d), aena: fechaAena(d) };
+  console.log(`[historico] Generando ${fechaObjetivo.iso} estado=${estado}`);
+
+  const [salidasRaw, llegadasRaw] = await Promise.all([
+    fetchAena('S'),
+    fetchAena('L')
+  ]);
+
+  const resumen = calcularResumenHistorico({ salidasRaw, llegadasRaw, fechaObjetivo, estado });
+  await enviarResumenSheets(resumen);
+  console.log(`[historico] Guardado ${resumen.fecha} total=${resumen.total_vuelos} S=${resumen.salidas} L=${resumen.llegadas}`);
+  return resumen;
+}
+
+async function runHistoricoSeguro(offsetDays, estado, key) {
+  if (historicoRunning) return;
+  if (lastHistoricoRunKey === key) return;
+  historicoRunning = true;
+  lastHistoricoRunKey = key;
+  try {
+    await guardarHistoricoVuelos(offsetDays, estado);
+  } catch (e) {
+    console.error('[historico] error:', e.message);
+  } finally {
+    historicoRunning = false;
+  }
+}
+
+function iniciarProgramadorHistorico() {
+  setInterval(() => {
+    const d = madridDate(0);
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    const hm = `${hh}:${mm}`;
+    const dia = fechaISO(d);
+
+    if (hm === '20:00') runHistoricoSeguro(1, 'previsto', `${dia}-20:00-manana`);
+    if (hm === '02:00') runHistoricoSeguro(0, 'actualizado', `${dia}-02:00-hoy`);
+    if (hm === '12:00') runHistoricoSeguro(0, 'actualizado', `${dia}-12:00-hoy`);
+    if (hm === '23:50') runHistoricoSeguro(0, 'cerrado', `${dia}-23:50-hoy`);
+  }, 30 * 1000);
+}
+
 async function getVuelos(tipo) {
   const flightType = tipo === 'salidas' ? 'S' : 'L';
   const data = await fetchAena(flightType);
 
-  const ahoraES = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/Madrid' }));
+  const ahoraES = madridDate(0);
   const mostrarManana = ahoraES.getHours() >= 20;
 
-  function fechaStr(d) {
-    return String(d.getDate()).padStart(2,'0') + '/' +
-           String(d.getMonth()+1).padStart(2,'0') + '/' + d.getFullYear();
-  }
-  const hoyStr = fechaStr(ahoraES);
-  const manana = new Date(ahoraES); manana.setDate(manana.getDate() + 1);
-  const mananaStr = fechaStr(manana);
+  const hoyStr = fechaAena(ahoraES);
+  const mananaStr = fechaAena(madridDate(1));
 
   const vueling = data.filter(v => {
     if (!esVuelingPuro(v)) return false;
@@ -175,31 +285,27 @@ async function getVuelos(tipo) {
 
   console.log(`[vuelos] ${tipo} — total=${data.length} VYpuro=${vueling.length} mañana=${mostrarManana}`);
 
-  // Estados especiales por tipo: INI en llegadas = Programado, en salidas = Rodando
   const ESTADOS_LLEGADAS = { 'INI': { t: 'Programado', c: 'e-scheduled' } };
   const ESTADOS_SALIDAS  = { 'INI': { t: 'Programado', c: 'e-scheduled'  } };
 
   return vueling.map(v => {
     const estadoCod = v.estado || 'SCH';
-    // Override por tipo si aplica
     const override = tipo === 'llegadas' ? ESTADOS_LLEGADAS[estadoCod] : ESTADOS_SALIDAS[estadoCod];
     let estado     = override || ESTADOS[estadoCod] || { t: estadoCod, c: 'e-scheduled' };
     const horaProg = fmtHora(v.horaProgramada);
     const horaEst  = fmtHora(v.horaEstimada);
 
-    // Para llegadas: si estado es "en vuelo" pero hora estimada pasó hace +15 min → Entrega equipajes
     if (tipo === 'llegadas') {
       const estadosEnVuelo = ['IBK','FLY','AIR','DEP','OFB','TKO','INI','BOR','EMB','ULL','LST','GCL','CLO','CER','OPN','TXI'];
       if (estadosEnVuelo.includes(estadoCod)) {
         const horaRef = v.horaEstimada || v.horaProgramada || '';
         if (horaRef) {
           const [h, m] = horaRef.substring(0,5).split(':').map(Number);
-          const ahoraEspanya = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/Madrid' }));
+          const ahoraEspanya = madridDate(0);
           const llegadaEspanya = new Date(ahoraEspanya);
           llegadaEspanya.setHours(h, m, 0, 0);
           if (llegadaEspanya - ahoraEspanya > 12 * 60 * 60 * 1000) llegadaEspanya.setDate(llegadaEspanya.getDate() - 1);
           const minutosPasados = (ahoraEspanya - llegadaEspanya) / 60000;
-          // Solo aplicar si el tiempo es razonable (entre 15 min y 5 horas)
           if (minutosPasados >= 15 && minutosPasados < 300) {
             estado = { t: 'Entrega equipajes', c: 'e-equip' };
           }
@@ -207,23 +313,19 @@ async function getVuelos(tipo) {
       }
     }
 
-    // Para salidas: Finalizado = ya despegó = En vuelo
     if (tipo === 'salidas' && ['FNL','FIN'].includes(estadoCod)) {
       estado = { t: 'En vuelo', c: 'e-active' };
     }
 
-    // Para salidas: si estado es "en tierra" pero la hora estimada pasó hace +15 min → En vuelo
     if (tipo === 'salidas') {
       const estadosEnTierra = ['BOR','EMB','ULL','LST','GCL','CLO','CER','OPN'];
       if (estadosEnTierra.includes(estadoCod)) {
         const horaRef = v.horaEstimada || v.horaProgramada || '';
         if (horaRef) {
           const [h, m] = horaRef.substring(0,5).split(':').map(Number);
-          // Usar hora local de España (Europe/Madrid) para comparar con los datos de AENA
-          const ahoraEspanya = new Date(new Date().toLocaleString('en-US', { timeZone: 'Europe/Madrid' }));
+          const ahoraEspanya = madridDate(0);
           const salidaEspanya = new Date(ahoraEspanya);
           salidaEspanya.setHours(h, m, 0, 0);
-          // Si la hora de salida fue ayer (vuelo nocturno), ajustar
           if (salidaEspanya - ahoraEspanya > 12 * 60 * 60 * 1000) salidaEspanya.setDate(salidaEspanya.getDate() - 1);
           const minutosPasados = (ahoraEspanya - salidaEspanya) / 60000;
           console.log(`[15min] VY${v.numVuelo} horaRef=${horaRef} minutos=${minutosPasados.toFixed(1)}`);
@@ -258,7 +360,7 @@ async function getVuelos(tipo) {
   });
 }
 
-app.get('/health', (req, res) => res.json({ ok: true, session: !!sessionCookie }));
+app.get('/health', (req, res) => res.json({ ok: true, session: !!sessionCookie, sheets: !!SHEETS_WEBHOOK_URL }));
 
 app.get('/refresh', (req, res) => {
   cache.llegadas = null; cache.salidas = null;
@@ -266,13 +368,27 @@ app.get('/refresh', (req, res) => {
   res.json({ ok: true, msg: 'Cache limpiado' });
 });
 
+app.get('/historico-vuelos/run', async (req, res) => {
+  try {
+    if (!SHEETS_TOKEN || req.query.token !== SHEETS_TOKEN) {
+      return res.status(403).json({ ok: false, error: 'Token no valido' });
+    }
+    const target = req.query.target === 'manana' ? 'manana' : 'hoy';
+    const estado = String(req.query.estado || (target === 'manana' ? 'previsto' : 'actualizado'));
+    const resumen = await guardarHistoricoVuelos(target === 'manana' ? 1 : 0, estado);
+    res.json({ ok: true, resumen });
+  } catch(e) {
+    console.error('[historico manual]', e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.get("/buscar", async (req, res) => {
   try {
     const tipo = req.query.tipo || "salidas";
     const num  = req.query.vuelo || "";
     const data = await fetchAena(tipo === "salidas" ? "S" : "L");
-    const hoy  = new Date();
-    const hoyStr = String(hoy.getDate()).padStart(2,"0")+"/"+String(hoy.getMonth()+1).padStart(2,"0")+"/"+hoy.getFullYear();
+    const hoyStr = fechaAena(madridDate(0));
     const encontrado = data.filter(v => v.fecha === hoyStr && v.numVuelo === num);
     res.json({ ok: true, total: encontrado.length, vuelos: encontrado });
   } catch(e) { res.json({ ok: false, error: e.message }); }
@@ -282,8 +398,7 @@ app.get('/debug', async (req, res) => {
   try {
     const tipo = req.query.tipo || 'llegadas';
     const data = await fetchAena(tipo === 'salidas' ? 'S' : 'L');
-    const hoy = new Date();
-    const hoyStr = String(hoy.getDate()).padStart(2,'0')+'/'+String(hoy.getMonth()+1).padStart(2,'0')+'/'+hoy.getFullYear();
+    const hoyStr = fechaAena(madridDate(0));
     const hoyTodos = data.filter(v => v.fecha === hoyStr);
     const hoyVY    = hoyTodos.filter(esVuelingPuro);
     res.json({
@@ -316,17 +431,11 @@ app.get('/vuelos', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`[server] Puerto ${PORT}`));
-getSession().catch(err => console.error('[arranque]', err.message));
-
-// Endpoint para ver TODOS los VY/VLG del día, incluyendo los rechazados por el filtro
 app.get('/debug-vy', async (req, res) => {
   try {
     const tipo = req.query.tipo || 'salidas';
     const data = await fetchAena(tipo === 'salidas' ? 'S' : 'L');
-    const hoy = new Date();
-    const hoyStr = String(hoy.getDate()).padStart(2,'0')+'/'+String(hoy.getMonth()+1).padStart(2,'0')+'/'+hoy.getFullYear();
-    // Todos los que tienen iataCompania VY o oaciCompania VLG hoy
+    const hoyStr = fechaAena(madridDate(0));
     const todos = data.filter(v => v.fecha === hoyStr && (v.iataCompania === 'VY' || v.oaciCompania === 'VLG'));
     res.json({
       ok: true, tipo, hoyStr, total: todos.length,
@@ -342,3 +451,11 @@ app.get('/debug-vy', async (req, res) => {
     });
   } catch(e) { res.json({ ok: false, error: e.message }); }
 });
+
+app.listen(PORT, () => {
+  console.log(`[server] Puerto ${PORT}`);
+  console.log(`[historico] Sheets configurado: ${!!SHEETS_WEBHOOK_URL}`);
+  iniciarProgramadorHistorico();
+});
+
+getSession().catch(err => console.error('[arranque]', err.message));
