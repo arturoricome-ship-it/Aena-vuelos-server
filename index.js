@@ -271,7 +271,7 @@ async function getVuelos(tipo) {
   const data = await fetchAena(flightType);
 
   const ahoraES = madridDate(0);
-  const mostrarManana = ahoraES.getHours() >= 20;
+  const mostrarManana = ahoraES.getHours() >= 16;
 
   const hoyStr = fechaAena(ahoraES);
   const mananaStr = fechaAena(madridDate(1));
