@@ -419,8 +419,15 @@ app.get('/debug', async (req, res) => {
 // /vuelos-tv devuelve los estados traducidos directamente desde el código AENA,
 // sin reglas por tiempo que inventen "Entrega equipajes" o "En vuelo".
 
-function estadoTvDesdeAena(estadoCod) {
+function estadoTvDesdeAena(estadoCod, tipo) {
   const cod = String(estadoCod || 'SCH').toUpperCase();
+
+  // Traducciones específicas para llegadas.
+  // AENA web usa algunos códigos de salida también en llegadas.
+  if (tipo === 'llegadas') {
+    if (cod === 'BOR') return { t: 'ENTREGA EQUIP.', c: 'e-equip' };
+    if (cod === 'INI') return { t: 'PROGRAMADO', c: 'e-scheduled' };
+  }
 
   const MAP_TV = {
     SCH: { t: 'PROGRAMADO',       c: 'e-scheduled' },
@@ -441,7 +448,7 @@ function estadoTvDesdeAena(estadoCod) {
     CER: { t: 'CERRADO',          c: 'e-gate' },
 
     TXI: { t: 'RODANDO',          c: 'e-taxiing' },
-    INI: { t: 'RODANDO',          c: 'e-taxiing' },
+    INI: { t: 'PROGRAMADO',       c: 'e-scheduled' },
 
     DEP: { t: 'EN VUELO',         c: 'e-active' },
     AIR: { t: 'EN VUELO',         c: 'e-active' },
@@ -488,7 +495,7 @@ async function getVuelosTv(tipo) {
 
   return vueling.map(v => {
     const estadoCod = String(v.estado || 'SCH').toUpperCase();
-    const estado = estadoTvDesdeAena(estadoCod);
+    const estado = estadoTvDesdeAena(estadoCod, tipo);
 
     const horaProg = fmtHora(v.horaProgramada);
     const horaEst  = fmtHora(v.horaEstimada);
