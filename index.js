@@ -411,6 +411,161 @@ app.get('/debug', async (req, res) => {
   } catch(e) { res.json({ ok: false, error: e.message }); }
 });
 
+
+// -----------------------------------------------------------------------------
+// ENDPOINT TV COMEDOR
+// -----------------------------------------------------------------------------
+// No toca /vuelos, que sigue siendo el endpoint usado por la web CTA.
+// /vuelos-tv devuelve los estados traducidos directamente desde el código AENA,
+// sin reglas por tiempo que inventen "Entrega equipajes" o "En vuelo".
+
+function estadoTvDesdeAena(estadoCod) {
+  const cod = String(estadoCod || 'SCH').toUpperCase();
+
+  const MAP_TV = {
+    SCH: { t: 'PROGRAMADO',       c: 'e-scheduled' },
+    NEW: { t: 'PROGRAMADO',       c: 'e-scheduled' },
+    HOR: { t: 'EN HORA',          c: 'e-scheduled' },
+
+    DEL: { t: 'RETRASADO',        c: 'e-delayed' },
+    RET: { t: 'RETRASADO',        c: 'e-delayed' },
+
+    OPN: { t: 'ABIERTO',          c: 'e-boarding' },
+    BOR: { t: 'EMBARCANDO',       c: 'e-boarding' },
+    EMB: { t: 'EMBARCANDO',       c: 'e-boarding' },
+    LST: { t: 'ÚLTIMA LLAMADA',   c: 'e-boarding' },
+    ULL: { t: 'ÚLTIMA LLAMADA',   c: 'e-boarding' },
+
+    GCL: { t: 'PUERTA CERRADA',   c: 'e-gate' },
+    CLO: { t: 'CERRADO',          c: 'e-gate' },
+    CER: { t: 'CERRADO',          c: 'e-gate' },
+
+    TXI: { t: 'RODANDO',          c: 'e-taxiing' },
+    INI: { t: 'RODANDO',          c: 'e-taxiing' },
+
+    DEP: { t: 'EN VUELO',         c: 'e-active' },
+    AIR: { t: 'EN VUELO',         c: 'e-active' },
+    FLY: { t: 'EN VUELO',         c: 'e-active' },
+    IBK: { t: 'EN VUELO',         c: 'e-active' },
+    TKO: { t: 'EN VUELO',         c: 'e-active' },
+    OFB: { t: 'EN VUELO',         c: 'e-active' },
+
+    LND: { t: 'EN TIERRA',        c: 'e-landed' },
+    ARR: { t: 'EN TIERRA',        c: 'e-landed' },
+
+    EQP: { t: 'ENTREGA EQUIP.',   c: 'e-equip' },
+    REC: { t: 'ENTREGA EQUIP.',   c: 'e-equip' },
+
+    FNL: { t: 'FINALIZADO',       c: 'e-final' },
+    FIN: { t: 'FINALIZADO',       c: 'e-final' },
+
+    CAN: { t: 'CANCELADO',        c: 'e-cancelled' },
+    CNX: { t: 'CANCELADO',        c: 'e-cancelled' },
+    DIV: { t: 'DESVIADO',         c: 'e-delayed' }
+  };
+
+  return MAP_TV[cod] || { t: cod, c: 'e-scheduled' };
+}
+
+async function getVuelosTv(tipo) {
+  const flightType = tipo === 'salidas' ? 'S' : 'L';
+  const data = await fetchAena(flightType);
+
+  const ahoraES = madridDate(0);
+  const mostrarManana = ahoraES.getHours() >= 16;
+
+  const hoyStr = fechaAena(ahoraES);
+  const mananaStr = fechaAena(madridDate(1));
+
+  const vueling = data.filter(v => {
+    if (!esVuelingPuro(v)) return false;
+    if (v.fecha === hoyStr) return true;
+    if (mostrarManana && v.fecha === mananaStr) return true;
+    return false;
+  });
+
+  console.log(`[vuelos-tv] ${tipo} — total=${data.length} VYpuro=${vueling.length} mañana=${mostrarManana}`);
+
+  return vueling.map(v => {
+    const estadoCod = String(v.estado || 'SCH').toUpperCase();
+    const estado = estadoTvDesdeAena(estadoCod);
+
+    const horaProg = fmtHora(v.horaProgramada);
+    const horaEst  = fmtHora(v.horaEstimada);
+    const ciudad   = limpiarCiudad(v.ciudadIataOtro);
+    const esManana = v.fecha === mananaStr;
+
+    if (tipo === 'llegadas') {
+      return {
+        numero: 'VY' + v.numVuelo,
+        origen: ciudad,
+        horaProg,
+        horaReal: horaEst !== horaProg ? horaEst : '',
+        sala:  (v.salaPrimera  && v.salaPrimera  !== 'null') ? v.salaPrimera  : '',
+        cinta: (v.cintaPrimera && v.cintaPrimera !== 'null') ? v.cintaPrimera : '',
+        estado: estado.t,
+        estadoClass: estado.c,
+        estadoCod,
+        esManana
+      };
+    }
+
+    return {
+      numero: 'VY' + v.numVuelo,
+      destino: ciudad,
+      horaProg,
+      horaReal: horaEst !== horaProg ? horaEst : '',
+      puerta: (v.puertaPrimera && v.puertaPrimera !== 'null') ? v.puertaPrimera : '',
+      estado: estado.t,
+      estadoClass: estado.c,
+      estadoCod,
+      esManana
+    };
+  }).sort((a, b) => {
+    if (a.esManana !== b.esManana) return a.esManana ? 1 : -1;
+    return a.horaProg.localeCompare(b.horaProg);
+  });
+}
+
+app.get('/vuelos-tv', async (req, res) => {
+  const tipo = req.query.tipo || 'llegadas';
+  const cacheKey = `tv_${tipo}`;
+  const tsKey = `ts_tv_${tipo}`;
+  const ahora = Date.now();
+
+  if (cache[cacheKey] && cache[tsKey] && (ahora - cache[tsKey]) < CACHE_MS) {
+    return res.json({
+      ok: true,
+      vuelos: cache[cacheKey],
+      cached: true,
+      total: cache[cacheKey].length
+    });
+  }
+
+  try {
+    const vuelos = await getVuelosTv(tipo);
+    cache[cacheKey] = vuelos;
+    cache[tsKey] = ahora;
+    res.json({
+      ok: true,
+      vuelos,
+      cached: false,
+      total: vuelos.length
+    });
+  } catch (err) {
+    console.error(`[error-tv] ${tipo}:`, err.message);
+    if (cache[cacheKey]) {
+      return res.json({
+        ok: true,
+        vuelos: cache[cacheKey],
+        cached: true,
+        stale: true
+      });
+    }
+    res.json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/vuelos', async (req, res) => {
   const tipo  = req.query.tipo || 'llegadas';
   const ahora = Date.now();
