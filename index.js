@@ -222,15 +222,38 @@ const MATCH_INFERIDO_MIN_MIN = 20;
 const MATCH_INFERIDO_MAX_MIN = 240;
 
 function emparejarPorMatricula(llegadas, salidas) {
-  // 1) Pase fuerte: las DOS piernas ya tienen matrícula real vista por FR24
-  // (el avión de la llegada y el de la salida son, sin duda, el mismo).
-  const salidasPorReg = new Map();
-  salidas.forEach(s => { if (s.matricula) salidasPorReg.set(s.matricula, s); });
-  llegadas.forEach(l => {
-    if (!l.matricula) return;
-    const pareja = salidasPorReg.get(l.matricula);
-    if (!pareja) return;
-    _marcarPareja(l, pareja, true);
+  // 1) Pase fuerte: las DOS piernas ya tienen matrícula real vista por FR24.
+  // Si el mismo avión hace VARIAS rotaciones en Alicante el mismo día
+  // (llega, sale, vuelve a llegar más tarde, vuelve a salir...), no basta
+  // con "matrícula igual = pareja": hay que encadenar en orden de tiempo,
+  // para que la 2ª llegada se empareje con la 2ª salida (la que viene
+  // después de ella), no con la 1ª salida que ya se fue hace rato.
+  const matriculas = new Set();
+  llegadas.forEach(l => { if (l.matricula) matriculas.add(l.matricula); });
+  salidas.forEach(s => { if (s.matricula) matriculas.add(s.matricula); });
+
+  matriculas.forEach(reg => {
+    const tramosLl = llegadas
+      .filter(l => l.matricula === reg)
+      .map(l => ({ v: l, min: _minutosDesdeHHMM(l.horaFr24 || l.horaReal || l.horaProg) }))
+      .filter(t => t.min !== null)
+      .sort((a, b) => a.min - b.min);
+    const tramosSa = salidas
+      .filter(s => s.matricula === reg)
+      .map(s => ({ v: s, min: _minutosDesdeHHMM(s.horaFr24 || s.horaReal || s.horaProg) }))
+      .filter(t => t.min !== null);
+
+    tramosLl.forEach(ll => {
+      let mejor = null, mejorDif = Infinity;
+      tramosSa.forEach(sa => {
+        if (sa.v.parejaVuelo) return; // ya emparejada con otra llegada de esta misma matrícula
+        let dif = sa.min - ll.min;
+        if (dif < 0) dif += 1440; // por si la llegada fue ayer noche
+        if (dif < 5) return; // la salida tiene que ser claramente DESPUÉS de esta llegada
+        if (dif < mejorDif) { mejorDif = dif; mejor = sa; }
+      });
+      if (mejor) _marcarPareja(ll.v, mejor.v, true);
+    });
   });
 
   // 2) Pase de inferencia: la llegada SÍ tiene matrícula confirmada (el avión
@@ -432,6 +455,14 @@ async function getVuelos(tipo) {
 
   console.log(`[vuelos] ${tipo} — total=${data.length} VYpuro=${vueling.length} mañana=${mostrarManana}`);
 
+  // Ground truth de FR24 para salidas: si FR24 ya está viendo este vuelo en
+  // directo (ADS-B), es un hecho real de que ya despegó — más fiable que el
+  // truco de "han pasado 15 min desde la hora que dice AENA", que se queda
+  // corto si AENA no ha actualizado su propia estimación a tiempo (esto es
+  // justo lo que reportaste: la web seguía con cuenta atrás aunque el avión
+  // ya hubiera salido según FR24).
+  const fr24Map = tipo === 'salidas' ? await getFr24Map() : null;
+
   const ESTADOS_LLEGADAS = { 'INI': { t: 'Programado', c: 'e-scheduled' } };
   const ESTADOS_SALIDAS  = { 'INI': { t: 'Programado', c: 'e-scheduled'  } };
 
@@ -460,24 +491,33 @@ async function getVuelos(tipo) {
       }
     }
 
-    if (tipo === 'salidas' && ['FNL','FIN'].includes(estadoCod)) {
-      estado = { t: 'En vuelo', c: 'e-active' };
-    }
-
     if (tipo === 'salidas') {
-      const estadosEnTierra = ['BOR','EMB','ULL','LST','GCL','CLO','CER','OPN'];
-      if (estadosEnTierra.includes(estadoCod)) {
-        const horaRef = v.horaEstimada || v.horaProgramada || '';
-        if (horaRef) {
-          const [h, m] = horaRef.substring(0,5).split(':').map(Number);
-          const ahoraEspanya = madridDate(0);
-          const salidaEspanya = new Date(ahoraEspanya);
-          salidaEspanya.setHours(h, m, 0, 0);
-          if (salidaEspanya - ahoraEspanya > 12 * 60 * 60 * 1000) salidaEspanya.setDate(salidaEspanya.getDate() - 1);
-          const minutosPasados = (ahoraEspanya - salidaEspanya) / 60000;
-          console.log(`[15min] VY${v.numVuelo} horaRef=${horaRef} minutos=${minutosPasados.toFixed(1)}`);
-          if (minutosPasados >= 15) {
-            estado = { t: 'En vuelo', c: 'e-active' };
+      const numeroCompleto = ('VY' + v.numVuelo).toUpperCase();
+      const fr24YaEnVuelo = fr24Map && fr24Map.has(numeroCompleto) && estadoCod !== 'CAN' && estadoCod !== 'CNX';
+
+      if (fr24YaEnVuelo) {
+        // FR24 confirma en directo que este vuelo ya está en el aire: pisa
+        // cualquier cosa que diga AENA, sea cual sea su estado/hora actual.
+        estado = { t: 'En vuelo', c: 'e-active' };
+        console.log(`[fr24] VY${v.numVuelo} confirmado en vuelo por FR24 (ground truth, ignora estado de AENA)`);
+      } else {
+        if (['FNL','FIN'].includes(estadoCod)) {
+          estado = { t: 'En vuelo', c: 'e-active' };
+        }
+        const estadosEnTierra = ['BOR','EMB','ULL','LST','GCL','CLO','CER','OPN'];
+        if (estadosEnTierra.includes(estadoCod)) {
+          const horaRef = v.horaEstimada || v.horaProgramada || '';
+          if (horaRef) {
+            const [h, m] = horaRef.substring(0,5).split(':').map(Number);
+            const ahoraEspanya = madridDate(0);
+            const salidaEspanya = new Date(ahoraEspanya);
+            salidaEspanya.setHours(h, m, 0, 0);
+            if (salidaEspanya - ahoraEspanya > 12 * 60 * 60 * 1000) salidaEspanya.setDate(salidaEspanya.getDate() - 1);
+            const minutosPasados = (ahoraEspanya - salidaEspanya) / 60000;
+            console.log(`[15min] VY${v.numVuelo} horaRef=${horaRef} minutos=${minutosPasados.toFixed(1)}`);
+            if (minutosPasados >= 15) {
+              estado = { t: 'En vuelo', c: 'e-active' };
+            }
           }
         }
       }
