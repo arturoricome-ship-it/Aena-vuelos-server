@@ -16,6 +16,18 @@ const SHEETS_TOKEN = process.env.SHEETS_TOKEN || '';
 let historicoRunning = false;
 let lastHistoricoRunKey = '';
 
+// ─── Flightradar24 (matrícula real + refinado de hora en vivo) ──────────
+// El token por defecto es el que me pasaste. Si algún día lo rotas en el
+// portal de FR24, basta con poner la variable de entorno FR24_API_KEY en
+// Railway con el valor nuevo — no haría falta volver a tocar este archivo.
+const FR24_API_KEY = process.env.FR24_API_KEY || '019f164f-ea31-7035-bef5-5df3f27c0bf1|o24pYSjjkP8qG0p6FejRt9pWvm1Y2JZmjJSi2ujE3fe8d83c';
+const FR24_BASE = 'https://fr24api.flightradar24.com';
+let fr24Cache = { mapa: new Map(), ts: 0 };
+// Igual que con AENA: UNA sola llamada compartida cada pocos minutos, nunca
+// una llamada por cada usuario que abre la app — así no se disparan los
+// créditos del plan de pago.
+const FR24_CACHE_MS = 3 * 60 * 1000;
+
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Headers', 'Content-Type');
@@ -116,6 +128,92 @@ async function fetchAena(flightType) {
 function fmtHora(hora) {
   if (!hora) return '--:--';
   return hora.substring(0, 5);
+}
+
+// ─── Flightradar24: posiciones en vivo de ALC, con matrícula ───────────
+async function fetchFr24Posiciones() {
+  const url = `${FR24_BASE}/api/live/flight-positions/full?airports=ALC`;
+  const headers = {
+    'Accept': 'application/json',
+    'Authorization': `Bearer ${FR24_API_KEY}`,
+    'Accept-Version': 'v1'
+  };
+  console.log('[fr24] GET live/flight-positions/full?airports=ALC');
+  const res = await fetch(url, { headers });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`FR24 HTTP ${res.status}: ${body.substring(0, 200)}`);
+  }
+  const json = await res.json();
+  return json.data || [];
+}
+
+// Caché en memoria compartida por todos los usuarios (igual filosofía que
+// sessionCookie/cache de AENA). Si FR24 falla, se devuelve el mapa anterior
+// (puede estar vacío si nunca llegó a funcionar) en vez de romper nada.
+async function getFr24Map() {
+  const ahora = Date.now();
+  if (fr24Cache.mapa.size && (ahora - fr24Cache.ts) < FR24_CACHE_MS) {
+    return fr24Cache.mapa;
+  }
+  try {
+    const vuelos = await fetchFr24Posiciones();
+    const mapa = new Map();
+    for (const v of vuelos) {
+      if (v.flight) mapa.set(String(v.flight).toUpperCase().trim(), v);
+    }
+    fr24Cache = { mapa, ts: ahora };
+    console.log(`[fr24] OK — ${mapa.size} vuelos con posición y matrícula`);
+    return mapa;
+  } catch (e) {
+    console.error('[fr24] error (se sigue usando la caché anterior si la hay):', e.message);
+    return fr24Cache.mapa;
+  }
+}
+
+// FR24 da el "eta" en UTC ISO (ej. "2026-06-29T18:51:28Z"); lo pasamos a
+// HH:MM en hora de Madrid para que combine con el resto de horas de AENA.
+function fr24EtaAHoraMadrid(etaIso) {
+  if (!etaIso) return '';
+  try {
+    const d = new Date(etaIso);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleString('es-ES', { timeZone: 'Europe/Madrid', hour: '2-digit', minute: '2-digit', hour12: false });
+  } catch (e) { return ''; }
+}
+
+// Añade matrícula/tipo de avión/hora en vivo a un vuelo de AENA, cuando FR24
+// trae ese mismo número de vuelo (v.numero ya es "VY"+numVuelo, igual que
+// el campo "flight" de FR24, ej. "VY1377"). Si no hay match, deja los campos
+// vacíos — nunca se inventa nada.
+function enriquecerConFr24(v, fr24Map) {
+  const entry = fr24Map.get(String(v.numero).toUpperCase().trim());
+  if (!entry) return { ...v, matricula: '', tipoAvion: '', horaFr24: '' };
+  return {
+    ...v,
+    matricula: entry.reg || '',
+    tipoAvion: entry.type || '',
+    horaFr24: fr24EtaAHoraMadrid(entry.eta)
+  };
+}
+
+// Cruza llegadas y salidas por matrícula real (no por horario adivinado).
+// Si dos vuelos comparten matrícula, se anota en cada uno los datos del otro
+// (parejaVuelo/parejaCiudad/parejaHora) para que el frontend pueda unirlos.
+function emparejarPorMatricula(llegadas, salidas) {
+  const salidasPorReg = new Map();
+  salidas.forEach(s => { if (s.matricula) salidasPorReg.set(s.matricula, s); });
+  llegadas.forEach(l => {
+    if (!l.matricula) return;
+    const pareja = salidasPorReg.get(l.matricula);
+    if (!pareja) return;
+    l.parejaVuelo   = pareja.numero;
+    l.parejaCiudad  = pareja.destino;
+    l.parejaHora    = pareja.horaFr24 || pareja.horaReal || pareja.horaProg;
+    pareja.parejaVuelo  = l.numero;
+    pareja.parejaCiudad = l.origen;
+    pareja.parejaHora   = l.horaFr24 || l.horaReal || l.horaProg;
+  });
 }
 
 const FLOTA_VUELING = ['A319','A320','A321','A32A','A32B','A20N','A21N','A318','A332'];
@@ -360,7 +458,28 @@ async function getVuelos(tipo) {
   });
 }
 
-app.get('/health', (req, res) => res.json({ ok: true, session: !!sessionCookie, sheets: !!SHEETS_WEBHOOK_URL }));
+// Mismo mecanismo de caché que ya usa la ruta /vuelos (comparten el objeto
+// `cache`), para que /rotaciones no dispare una segunda llamada a AENA si
+// alguien ya pidió /vuelos hace poco, y viceversa.
+async function getVuelosCacheado(tipo) {
+  const ahora = Date.now();
+  const tsKey = `ts_${tipo}`;
+  if (cache[tipo] && (ahora - cache[tsKey]) < CACHE_MS) {
+    return cache[tipo];
+  }
+  try {
+    const vuelos = await getVuelos(tipo);
+    cache[tipo] = vuelos;
+    cache[tsKey] = ahora;
+    return vuelos;
+  } catch (err) {
+    console.error(`[error] ${tipo}:`, err.message);
+    if (cache[tipo]) return cache[tipo];
+    throw err;
+  }
+}
+
+app.get('/health', (req, res) => res.json({ ok: true, session: !!sessionCookie, sheets: !!SHEETS_WEBHOOK_URL, fr24: !!FR24_API_KEY }));
 
 app.get('/refresh', (req, res) => {
   cache.llegadas = null; cache.salidas = null;
@@ -450,6 +569,46 @@ app.get('/debug-vy', async (req, res) => {
       }))
     });
   } catch(e) { res.json({ ok: false, error: e.message }); }
+});
+
+app.get('/fr24-debug', async (req, res) => {
+  try {
+    const mapa = await getFr24Map();
+    res.json({
+      ok: true,
+      total_detectados: mapa.size,
+      ejemplo: [...mapa.values()].slice(0, 10)
+    });
+  } catch (e) { res.json({ ok: false, error: e.message }); }
+});
+
+// Endpoint nuevo, no toca nada de /vuelos: AENA sigue siendo la fuente del
+// horario del día completo; FR24 solo añade matrícula, tipo de avión y,
+// cuando hay diferencia, una hora más reciente (horaFr24) — y aquí mismo
+// se cruzan llegadas+salidas por esa matrícula para detectar rotaciones.
+app.get('/rotaciones', async (req, res) => {
+  try {
+    const [llegadasBase, salidasBase] = await Promise.all([
+      getVuelosCacheado('llegadas'),
+      getVuelosCacheado('salidas')
+    ]);
+    const fr24Map = await getFr24Map();
+
+    const llegadas = llegadasBase.map(v => enriquecerConFr24(v, fr24Map));
+    const salidas  = salidasBase.map(v => enriquecerConFr24(v, fr24Map));
+    emparejarPorMatricula(llegadas, salidas);
+
+    res.json({
+      ok: true,
+      llegadas,
+      salidas,
+      fr24_vuelos_detectados: fr24Map.size,
+      actualizado: fechaHoraMadridISO()
+    });
+  } catch (e) {
+    console.error('[rotaciones] error:', e.message);
+    res.json({ ok: false, error: e.message });
+  }
 });
 
 app.listen(PORT, () => {
