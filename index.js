@@ -200,19 +200,68 @@ function enriquecerConFr24(v, fr24Map) {
 // Cruza llegadas y salidas por matrícula real (no por horario adivinado).
 // Si dos vuelos comparten matrícula, se anota en cada uno los datos del otro
 // (parejaVuelo/parejaCiudad/parejaHora) para que el frontend pueda unirlos.
+function _minutosDesdeHHMM(horaStr) {
+  if (!horaStr) return null;
+  const m = /^(\d{1,2}):(\d{2})$/.exec(horaStr);
+  if (!m) return null;
+  return (+m[1]) * 60 + (+m[2]);
+}
+
+function _marcarPareja(l, s, confirmada) {
+  l.parejaVuelo = s.numero; l.parejaCiudad = s.destino; l.parejaHora = s.horaFr24 || s.horaReal || s.horaProg; l.parejaConfirmada = confirmada;
+  s.parejaVuelo = l.numero; s.parejaCiudad = l.origen;  s.parejaHora = l.horaFr24 || l.horaReal || l.horaProg; s.parejaConfirmada = confirmada;
+}
+
+// Ventana de tiempo en tierra que consideramos plausible para "es el mismo
+// avión que sigue viaje" cuando solo UNO de los dos extremos tiene matrícula
+// confirmada todavía (el otro no ha emitido señal porque no ha hecho
+// push-back). Es una estimación razonable, no un hecho — por eso se marca
+// parejaConfirmada=false en ese caso, y se actualiza sola a true en cuanto
+// esa segunda pierna empiece a transmitir y FR24 confirme la matrícula real.
+const MATCH_INFERIDO_MIN_MIN = 20;
+const MATCH_INFERIDO_MAX_MIN = 240;
+
 function emparejarPorMatricula(llegadas, salidas) {
+  // 1) Pase fuerte: las DOS piernas ya tienen matrícula real vista por FR24
+  // (el avión de la llegada y el de la salida son, sin duda, el mismo).
   const salidasPorReg = new Map();
   salidas.forEach(s => { if (s.matricula) salidasPorReg.set(s.matricula, s); });
   llegadas.forEach(l => {
     if (!l.matricula) return;
     const pareja = salidasPorReg.get(l.matricula);
     if (!pareja) return;
-    l.parejaVuelo   = pareja.numero;
-    l.parejaCiudad  = pareja.destino;
-    l.parejaHora    = pareja.horaFr24 || pareja.horaReal || pareja.horaProg;
-    pareja.parejaVuelo  = l.numero;
-    pareja.parejaCiudad = l.origen;
-    pareja.parejaHora   = l.horaFr24 || l.horaReal || l.horaProg;
+    _marcarPareja(l, pareja, true);
+  });
+
+  // 2) Pase de inferencia: la llegada SÍ tiene matrícula confirmada (el avión
+  // ya voló y se vio en directo), pero la salida todavía no ha emitido nada.
+  // Si hay una salida sin matrícula cuya hora cae dentro de una ventana de
+  // tierra razonable después de esa llegada, asumimos que será el mismo
+  // avión — y se lo "prestamos" como matrícula prevista, marcando
+  // parejaConfirmada=false para dejar claro que aún no está confirmado del
+  // todo. En cuanto esa salida empiece a transmitir, el pase 1 del próximo
+  // refresco lo confirmará (o, si resulta ser otro avión, se corregirá solo).
+  const llegadasDisponibles = llegadas.filter(l => l.matricula && !l.parejaVuelo);
+  const salidasSinReg = salidas.filter(s => !s.matricula && !s.parejaVuelo);
+
+  salidasSinReg.forEach(s => {
+    const salMin = _minutosDesdeHHMM(s.horaFr24 || s.horaReal || s.horaProg);
+    if (salMin === null) return;
+    let mejor = null, mejorDif = Infinity;
+    llegadasDisponibles.forEach(l => {
+      if (l.parejaVuelo) return; // ya usada en una vuelta anterior de este mismo bucle
+      const llMin = _minutosDesdeHHMM(l.horaFr24 || l.horaReal || l.horaProg);
+      if (llMin === null) return;
+      let turnaround = salMin - llMin;
+      if (turnaround < 0) turnaround += 1440; // por si la llegada fue ayer noche y la salida ya es de hoy
+      if (turnaround < MATCH_INFERIDO_MIN_MIN || turnaround > MATCH_INFERIDO_MAX_MIN) return;
+      if (turnaround < mejorDif) { mejorDif = turnaround; mejor = l; }
+    });
+    if (mejor) {
+      s.matricula = mejor.matricula;
+      s.tipoAvion = s.tipoAvion || mejor.tipoAvion;
+      _marcarPareja(mejor, s, false);
+    }
   });
 }
 
